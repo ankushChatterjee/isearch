@@ -1,0 +1,13 @@
+# --- rare (1-5 files expected) ---
+validateTargetContainer
+spanDelimiter
+BlockPluginSync
+MaxContainerLogLineSize
+# --- medium (15-60 files expected) ---
+StartContainer
+NamespacedContext
+WithProcessKill
+# --- high frequency (200+ files) ---
+Copyright The containerd Authors
+context.Context
+fmt.Errorf

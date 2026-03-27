@@ -1,0 +1,17 @@
+# Rust
+/target/
+
+# Bundled corpus (large; fetch via scripts if needed)
+fixtures/
+
+# compare_rg.sh / local tool outputs
+.out*
+
+# Benchmarks
+bench/results.txt
+
+# Editor / OS
+*.rs.bk
+.DS_Store
+.idea/
+.vscode/
