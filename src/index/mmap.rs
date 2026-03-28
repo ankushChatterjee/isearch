@@ -6,7 +6,9 @@
 
 use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -170,25 +172,30 @@ impl MmapBundle {
     }
 
     /// Read `[count: u32 LE][doc_id: u32 LE]…` at payload offset `offset` from the postings file.
-    fn read_posting_list(&mut self, offset: u64) -> io::Result<Vec<DocId>> {
+    fn read_posting_list(&self, offset: u64) -> io::Result<Vec<DocId>> {
         let abs = self
             .postings_payload_base
             .checked_add(offset)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting offset overflow"))?;
-        self.postings.seek(SeekFrom::Start(abs))?;
         let mut word = [0u8; 4];
-        self.postings.read_exact(&mut word)?;
+        read_exact_at(&self.postings, &mut word, abs)?;
         let count = u32::from_le_bytes(word) as usize;
+
+        let bytes_len = count
+            .checked_mul(4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting doc bytes overflow"))?;
+        let mut docs_bytes = vec![0u8; bytes_len];
+        read_exact_at(&self.postings, &mut docs_bytes, abs + 4)?;
+
         let mut docs = Vec::with_capacity(count);
-        for _ in 0..count {
-            self.postings.read_exact(&mut word)?;
-            docs.push(DocId(u32::from_le_bytes(word)));
+        for chunk in docs_bytes.chunks_exact(4) {
+            docs.push(DocId(u32::from_le_bytes(chunk.try_into().unwrap())));
         }
         Ok(docs)
     }
 
     /// Intersect posting lists for all `hashes` (AND), same semantics as [`super::Index::candidates`].
-    pub fn candidates(&mut self, hashes: &[u32]) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
+    pub fn candidates(&self, hashes: &[u32]) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
         let mut postings_read_ms = 0.0f64;
         let mut postings_lists_read = 0u32;
         let mut result: Option<Vec<DocId>> = None;
@@ -216,4 +223,30 @@ impl MmapBundle {
             },
         ))
     }
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        let n = file.read_at(buf, offset)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer with pread",
+            ));
+        }
+        offset = offset.saturating_add(n as u64);
+        let (_, rest) = buf.split_at_mut(n);
+        buf = rest;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = file.try_clone()?;
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(buf)
 }

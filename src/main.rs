@@ -130,7 +130,7 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
     }
 
     let t_load = Instant::now();
-    let (mut bundle, paths, open_reads) = MmapBundle::open(&bundle_dir)?;
+    let (bundle, paths, open_reads) = MmapBundle::open(&bundle_dir)?;
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
         "opened bundle in {:.3}ms ({} docs)  [file reads: lookup open+mmap {:.3}ms, postings open+header {:.3}ms, paths.txt {:.3}ms]",
