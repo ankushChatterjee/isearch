@@ -3,8 +3,8 @@
 
 mod index;
 mod ngram;
+mod verify;
 
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -15,7 +15,6 @@ use ignore::WalkBuilder;
 use index::{
     write_bundle, DocId, Index, MmapBundle, PostingsReadTimings, index_bundle_path, pwd_hash,
 };
-
 /// `./relative/path` under `root`, or the path as given with `/` separators.
 fn query_result_path_display(file_path: &str, root: &Path) -> String {
     let p = Path::new(file_path);
@@ -170,40 +169,18 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
     let mut out = stdout.lock();
 
     let t_verify = Instant::now();
-    let mut verify_read_ms = 0.0f64;
+    let verify_results =
+        verify::verify_candidates_parallel(&candidates, &paths, query_bytes);
+
+    let verify_read_ms: f64 = verify_results.iter().map(|v| v.read_ms).sum();
     let mut result_count = 0usize;
-    let mut first_file_block = true;
-    for doc_id in &candidates {
-        let Some(rel_path) = paths.get(doc_id.0 as usize) else {
-            continue;
-        };
-        let t_read = Instant::now();
-        let content = match fs::read_to_string(rel_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}: read error: {e}", rel_path);
-                continue;
-            }
-        };
-        verify_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
-
-        let hits: Vec<(usize, &str)> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(&pattern))
-            .map(|(i, line)| (i + 1, line))
-            .collect();
-        if hits.is_empty() {
-            continue;
-        }
-
-        if !first_file_block {
+    for (idx, v) in verify_results.iter().enumerate() {
+        if idx > 0 {
             writeln!(out)?;
         }
-        first_file_block = false;
-        writeln!(out, "{}", query_result_path_display(rel_path, &root))?;
-        for (line_no, line) in hits {
-            writeln!(out, "{}:{}", line_no, line)?;
+        writeln!(out, "{}", query_result_path_display(&v.rel_path, &root))?;
+        for hit in &v.hits {
+            writeln!(out, "{}:{}", hit.line_no, hit.line)?;
             result_count += 1;
         }
     }
