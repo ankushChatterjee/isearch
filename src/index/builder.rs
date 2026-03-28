@@ -57,7 +57,8 @@ impl Index {
     /// Read paths in parallel, extract n-gram hashes per file, then assign
     /// [`DocId`]s in path order and finish the index pipeline.
     pub fn ingest_files(paths: &[String]) -> io::Result<(DocStore, Self)> {
-        const MAX_FILE_BYTES: usize = 512 * 1024;
+        const MAX_FILE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+        const BATCH_SIZE: usize = 512;
         let total = paths.len();
 
         let done = AtomicUsize::new(0);
@@ -65,38 +66,42 @@ impl Index {
         let _ = io::stderr().flush();
         let t = Instant::now();
 
-        let raw: Vec<io::Result<Option<(Vec<u8>, Vec<u32>)>>> = paths
-            .par_iter()
-            .map(|path| {
-                let bytes = fs::read(path)
-                    .map_err(|e| io::Error::other(format!("read {path}: {e}")))?;
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if n % 256 == 0 || n == total {
-                    eprint!("\r  [1/5] read + extract  {:>5} / {}", n, total);
-                    let _ = io::stderr().flush();
-                }
-                if is_binary(&bytes) || bytes.len() > MAX_FILE_BYTES {
-                    return Ok(None);
-                }
-                let hashes = ngram::extract_all_ngrams(&bytes)
-                    .map(|ng| ngram::hash_ngram(ng))
-                    .collect();
-                Ok(Some((bytes, hashes)))
-            })
-            .collect();
-
         let mut store = DocStore::new();
         let mut pairs: Vec<(u32, DocId)> = Vec::new();
         let mut skipped = 0usize;
-        for (path, result) in paths.iter().zip(raw) {
-            match result? {
-                None => skipped += 1,
-                Some((bytes, hashes)) => {
-                    let doc_id = store.add(path, bytes);
-                    pairs.extend(hashes.into_iter().map(|h| (h, doc_id)));
+
+        for chunk in paths.chunks(BATCH_SIZE) {
+            let extracted: Vec<io::Result<Option<Vec<u32>>>> = chunk
+                .par_iter()
+                .map(|path| {
+                    let bytes = fs::read(path)
+                        .map_err(|e| io::Error::other(format!("read {path}: {e}")))?;
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n % 256 == 0 || n == total {
+                        eprint!("\r  [1/5] read + extract  {:>5} / {}", n, total);
+                        let _ = io::stderr().flush();
+                    }
+                    if is_binary(&bytes) || bytes.len() > MAX_FILE_BYTES {
+                        return Ok(None);
+                    }
+                    let hashes = ngram::extract_all_ngrams(&bytes)
+                        .map(ngram::hash_ngram)
+                        .collect();
+                    Ok(Some(hashes))
+                })
+                .collect();
+
+            for (path, result) in chunk.iter().zip(extracted) {
+                match result? {
+                    None => skipped += 1,
+                    Some(hashes) => {
+                        let doc_id = store.add_path(path);
+                        pairs.extend(hashes.into_iter().map(|h| (h, doc_id)));
+                    }
                 }
             }
         }
+
         eprintln!(
             "\r  [1/5] read + extract  {} docs → {} pairs, {} skipped  ({:.2}s)",
             store.len(),
@@ -107,31 +112,6 @@ impl Index {
 
         let index = Self::build_from_pairs(pairs);
         Ok((store, index))
-    }
-
-    /// Build from an existing [`DocStore`] (sequential n-gram extraction).
-    #[allow(dead_code)] // alternate entry point for tests / tooling
-    pub fn build(store: &DocStore) -> Self {
-        let total_docs = store.len();
-        eprint!("  [1/5] extracting n-grams  {:>5} / {}", 0, total_docs);
-        let t = Instant::now();
-        let mut pairs: Vec<(u32, DocId)> = Vec::new();
-        for (n, (id, _, bytes)) in store.iter().enumerate() {
-            for ng in ngram::extract_all_ngrams(bytes) {
-                pairs.push((ngram::hash_ngram(ng), id));
-            }
-            if (n + 1) % 256 == 0 || n + 1 == total_docs {
-                eprint!("\r  [1/5] extracting n-grams  {:>5} / {}", n + 1, total_docs);
-                let _ = io::stderr().flush();
-            }
-        }
-        eprintln!(
-            "\r  [1/5] extracting n-grams  {} docs → {} pairs  ({:.2}s)",
-            total_docs,
-            pairs.len(),
-            t.elapsed().as_secs_f64()
-        );
-        Self::build_from_pairs(pairs)
     }
 
     fn build_from_pairs(mut pairs: Vec<(u32, DocId)>) -> Self {

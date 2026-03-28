@@ -5,7 +5,6 @@
 //! mmap the sorted hash→offset table for binary search; do **not** mmap the full postings blob.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -17,6 +16,7 @@ use super::format::{
     decode_file_header, read_paths_lines, LookupEntryRecord, LOOKUP_FILENAME, LOOKUP_MAGIC,
     PATHS_FILENAME, POSTINGS_FILENAME, POSTINGS_MAGIC,
 };
+use super::reader::intersect_sorted;
 use super::types::DocId;
 
 const HEADER_LEN: usize = 32;
@@ -170,7 +170,7 @@ impl MmapBundle {
     }
 
     /// Read `[count: u32 LE][doc_id: u32 LE]…` at payload offset `offset` from the postings file.
-    fn read_posting_list(&mut self, offset: u64) -> io::Result<HashSet<DocId>> {
+    fn read_posting_list(&mut self, offset: u64) -> io::Result<Vec<DocId>> {
         let abs = self
             .postings_payload_base
             .checked_add(offset)
@@ -179,22 +179,22 @@ impl MmapBundle {
         let mut word = [0u8; 4];
         self.postings.read_exact(&mut word)?;
         let count = u32::from_le_bytes(word) as usize;
-        let mut set = HashSet::with_capacity(count);
+        let mut docs = Vec::with_capacity(count);
         for _ in 0..count {
             self.postings.read_exact(&mut word)?;
-            set.insert(DocId(u32::from_le_bytes(word)));
+            docs.push(DocId(u32::from_le_bytes(word)));
         }
-        Ok(set)
+        Ok(docs)
     }
 
     /// Intersect posting lists for all `hashes` (AND), same semantics as [`super::Index::candidates`].
-    pub fn candidates(&mut self, hashes: &[u32]) -> io::Result<(HashSet<DocId>, PostingsReadTimings)> {
+    pub fn candidates(&mut self, hashes: &[u32]) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
         let mut postings_read_ms = 0.0f64;
         let mut postings_lists_read = 0u32;
-        let mut result: Option<HashSet<DocId>> = None;
+        let mut result: Option<Vec<DocId>> = None;
         for &hash in hashes {
             let Some(off) = self.lookup_hash(hash) else {
-                return Ok((HashSet::new(), PostingsReadTimings {
+                return Ok((Vec::new(), PostingsReadTimings {
                     ms: postings_read_ms,
                     postings_lists_read,
                 }));
@@ -205,7 +205,7 @@ impl MmapBundle {
             postings_lists_read += 1;
             result = Some(match result {
                 None => docs,
-                Some(c) => c.intersection(&docs).copied().collect(),
+                Some(c) => intersect_sorted(&c, &docs),
             });
         }
         Ok((

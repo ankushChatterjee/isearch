@@ -302,11 +302,11 @@ fn write_postings_file(path: &Path, index: &Index) -> io::Result<()> {
 /// **Pt 9:** Pre-sized buffer, one [`fs::write`] (no per-line syscalls).
 fn write_paths_file(path: &Path, store: &DocStore) -> io::Result<()> {
     let mut nbytes = 0usize;
-    for (_, p, _) in store.iter() {
+    for (_, p) in store.iter_paths() {
         nbytes = nbytes.saturating_add(p.len()).saturating_add(1);
     }
     let mut buf = Vec::with_capacity(nbytes);
-    for (_, p, _) in store.iter() {
+    for (_, p) in store.iter_paths() {
         buf.extend_from_slice(p.as_bytes());
         buf.push(b'\n');
     }

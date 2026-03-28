@@ -7,10 +7,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocId(pub u32);
 
-/// Holds the raw bytes and path for every indexed document.
+/// Holds document paths for indexed documents.
 /// `DocId(n)` is the index into the inner vec.
 pub struct DocStore {
-    pub(crate) docs: Vec<(String, Vec<u8>)>,
+    pub(crate) docs: Vec<String>,
 }
 
 impl DocStore {
@@ -18,30 +18,27 @@ impl DocStore {
         Self { docs: Vec::new() }
     }
 
-    /// Add a document and return its assigned `DocId`.
-    pub fn add(&mut self, path: &str, bytes: Vec<u8>) -> DocId {
+    /// Add a path and return its assigned `DocId`.
+    pub fn add_path(&mut self, path: &str) -> DocId {
         let id = DocId(self.docs.len() as u32);
-        self.docs.push((path.to_owned(), bytes));
+        self.docs.push(path.to_owned());
         id
     }
 
+    #[allow(dead_code)] // retained for API completeness
     pub fn path(&self, id: DocId) -> &str {
-        &self.docs[id.0 as usize].0
-    }
-
-    pub fn bytes(&self, id: DocId) -> &[u8] {
-        &self.docs[id.0 as usize].1
+        &self.docs[id.0 as usize]
     }
 
     pub fn len(&self) -> usize {
         self.docs.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (DocId, &str, &[u8])> {
+    pub fn iter_paths(&self) -> impl Iterator<Item = (DocId, &str)> {
         self.docs
             .iter()
             .enumerate()
-            .map(|(i, (path, bytes))| (DocId(i as u32), path.as_str(), bytes.as_slice()))
+            .map(|(i, path)| (DocId(i as u32), path.as_str()))
     }
 }
 
