@@ -84,7 +84,7 @@ pub mod flags {
 /// | 16     | 8    | `payload_size`   |
 /// | 24     | 8    | `entry_count`    |
 ///
-/// **Lookup file:** `payload_size` must equal `entry_count * 16` (see
+/// **Lookup file:** `payload_size` must equal `entry_count * 12` (see
 /// [`LookupEntryRecord`]). `entry_count` is the number of hash→offset rows.
 ///
 /// **Postings file:** `payload_size` is the byte length of the raw postings
@@ -144,14 +144,15 @@ impl IsearchIndexFileHeader {
 ///
 /// | Offset | Size | Field    |
 /// |--------|------|----------|
-/// | 0      | 8    | `hash`   |
-/// | 8      | 8    | `offset` |
+/// | 0      | 4    | `hash`   |
+/// | 4      | 8    | `offset` |
 ///
 /// Rows are stored **sorted by `hash`** ascending for binary search.
+/// Packed so the on-disk row is 12 bytes (no padding between `u32` and `u64`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
+#[repr(C, packed)]
 pub struct LookupEntryRecord {
-    pub hash:   u64,
+    pub hash:   u32,
     pub offset: u64,
 }
 
@@ -387,5 +388,10 @@ mod tests {
         let h = IsearchIndexFileHeader::lookup_new(10, 0);
         assert_eq!(h.entry_count, 10);
         assert_eq!(h.payload_size, 10 * LookupEntryRecord::SIZE as u64);
+    }
+
+    #[test]
+    fn lookup_entry_record_is_packed_12_bytes() {
+        assert_eq!(LookupEntryRecord::SIZE, 12);
     }
 }

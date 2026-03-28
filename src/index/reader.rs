@@ -11,7 +11,7 @@ impl LookupTable {
     }
 
     /// Binary-search for `hash`; returns the postings byte offset if found.
-    pub fn lookup(&self, hash: u64) -> Option<u64> {
+    pub fn lookup(&self, hash: u32) -> Option<u64> {
         self.entries
             .binary_search_by_key(&hash, |e| e.hash)
             .ok()
@@ -22,9 +22,9 @@ impl LookupTable {
         self.entries.len()
     }
 
-    /// On-disk size: 8 bytes hash + 8 bytes offset per entry.
+    /// On-disk size: 4 bytes hash + 8 bytes offset per entry.
     pub fn byte_size(&self) -> usize {
-        self.entries.len() * 16
+        self.entries.len() * 12
     }
 }
 
@@ -53,14 +53,14 @@ impl PostingsBlob {
 
 impl Index {
     /// `(byte_offset, posting_list)` for `hash`, or `None` if absent.
-    pub fn posting_list(&self, hash: u64) -> Option<(u64, HashSet<DocId>)> {
+    pub fn posting_list(&self, hash: u32) -> Option<(u64, HashSet<DocId>)> {
         self.lookup
             .lookup(hash)
             .map(|offset| (offset, self.postings.read(offset)))
     }
 
     /// Intersect posting lists for all `hashes` (AND over n-grams).
-    pub fn candidates(&self, hashes: &[u64]) -> HashSet<DocId> {
+    pub fn candidates(&self, hashes: &[u32]) -> HashSet<DocId> {
         let mut result: Option<HashSet<DocId>> = None;
         for &hash in hashes {
             match self.lookup.lookup(hash) {

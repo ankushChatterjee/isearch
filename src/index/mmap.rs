@@ -148,7 +148,7 @@ impl MmapBundle {
     }
 
     /// Binary search on the mmap’d lookup body; returns payload-relative offset into postings.
-    fn lookup_hash(&self, hash: u64) -> Option<u64> {
+    fn lookup_hash(&self, hash: u32) -> Option<u64> {
         let body = &self.lookup[HEADER_LEN..];
         let n = body.len() / LookupEntryRecord::SIZE;
         let mut lo = 0usize;
@@ -157,12 +157,12 @@ impl MmapBundle {
             let mid = (lo + hi) / 2;
             let base = mid * LookupEntryRecord::SIZE;
             let row = &body[base..base + LookupEntryRecord::SIZE];
-            let h = u64::from_le_bytes(row[0..8].try_into().ok()?);
+            let h = u32::from_le_bytes(row[0..4].try_into().ok()?);
             match h.cmp(&hash) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
-                    return Some(u64::from_le_bytes(row[8..16].try_into().ok()?));
+                    return Some(u64::from_le_bytes(row[4..12].try_into().ok()?));
                 }
             }
         }
@@ -188,7 +188,7 @@ impl MmapBundle {
     }
 
     /// Intersect posting lists for all `hashes` (AND), same semantics as [`super::Index::candidates`].
-    pub fn candidates(&mut self, hashes: &[u64]) -> io::Result<(HashSet<DocId>, PostingsReadTimings)> {
+    pub fn candidates(&mut self, hashes: &[u32]) -> io::Result<(HashSet<DocId>, PostingsReadTimings)> {
         let mut postings_read_ms = 0.0f64;
         let mut postings_lists_read = 0u32;
         let mut result: Option<HashSet<DocId>> = None;

@@ -50,7 +50,7 @@ impl DocStore {
 /// One row: maps an n-gram hash to a byte offset in [`PostingsBlob`].
 #[derive(Debug, Clone, Copy)]
 pub struct LookupEntry {
-    pub hash:   u64,
+    pub hash:   u32,
     pub offset: u64,
 }
 
@@ -64,7 +64,7 @@ pub struct LookupTable {
 /// One distinct n-gram hash and the documents that contain it, before serialization.
 #[derive(Debug)]
 pub struct Posting {
-    pub hash:    u64,
+    pub hash:    u32,
     pub doc_ids: Vec<DocId>,
 }
 

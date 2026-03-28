@@ -48,7 +48,7 @@ impl LookupTable {
         Self { entries: Vec::new() }
     }
 
-    pub(crate) fn push(&mut self, hash: u64, offset: u64) {
+    pub(crate) fn push(&mut self, hash: u32, offset: u64) {
         self.entries.push(super::types::LookupEntry { hash, offset });
     }
 }
@@ -65,7 +65,7 @@ impl Index {
         let _ = io::stderr().flush();
         let t = Instant::now();
 
-        let raw: Vec<io::Result<Option<(Vec<u8>, Vec<u64>)>>> = paths
+        let raw: Vec<io::Result<Option<(Vec<u8>, Vec<u32>)>>> = paths
             .par_iter()
             .map(|path| {
                 let bytes = fs::read(path)
@@ -86,7 +86,7 @@ impl Index {
             .collect();
 
         let mut store = DocStore::new();
-        let mut pairs: Vec<(u64, DocId)> = Vec::new();
+        let mut pairs: Vec<(u32, DocId)> = Vec::new();
         let mut skipped = 0usize;
         for (path, result) in paths.iter().zip(raw) {
             match result? {
@@ -115,7 +115,7 @@ impl Index {
         let total_docs = store.len();
         eprint!("  [1/5] extracting n-grams  {:>5} / {}", 0, total_docs);
         let t = Instant::now();
-        let mut pairs: Vec<(u64, DocId)> = Vec::new();
+        let mut pairs: Vec<(u32, DocId)> = Vec::new();
         for (n, (id, _, bytes)) in store.iter().enumerate() {
             for ng in ngram::extract_all_ngrams(bytes) {
                 pairs.push((ngram::hash_ngram(ng), id));
@@ -134,7 +134,7 @@ impl Index {
         Self::build_from_pairs(pairs)
     }
 
-    fn build_from_pairs(mut pairs: Vec<(u64, DocId)>) -> Self {
+    fn build_from_pairs(mut pairs: Vec<(u32, DocId)>) -> Self {
         eprint!("  [2/5] sorting {} pairs...", pairs.len());
         let _ = io::stderr().flush();
         let t = Instant::now();

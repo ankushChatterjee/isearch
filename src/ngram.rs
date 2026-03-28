@@ -95,12 +95,12 @@ pub fn covering_ngrams(text: &[u8]) -> Vec<&[u8]> {
     result
 }
 
-pub fn hash_ngram(ngram: &[u8]) -> u64 {
-    // FxHash or AHash — faster than SipHash for short keys
-    let mut h = 0xcbf29ce484222325u64; // FNV-1a
+/// FNV-1a 32-bit over `ngram` bytes. Shorter keys than `u64` for the lookup table; collisions
+pub fn hash_ngram(ngram: &[u8]) -> u32 {
+    let mut h = 0x811c_9dc5u32;
     for &b in ngram {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
     }
     h
 }

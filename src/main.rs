@@ -163,7 +163,7 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         )
     } else {
         let covering = ngram::covering_ngrams(query_bytes);
-        let hashes: Vec<u64> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
+        let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
         bundle.candidates(&hashes)?
     };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
@@ -265,7 +265,7 @@ fn run_demo() -> io::Result<()> {
     eprintln!("  build total: {:.2}s", t_total.elapsed().as_secs_f64());
 
     let covering = ngram::covering_ngrams(QUERY);
-    let hashes: Vec<u64> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
+    let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
 
     eprintln!("\n── query ─────────────────────────────────────────────");
     eprintln!("  term     : {:?}", String::from_utf8_lossy(QUERY));
@@ -276,11 +276,11 @@ fn run_demo() -> io::Result<()> {
     for (ng, &hash) in covering.iter().zip(&hashes) {
         match index.posting_list(hash) {
             None => eprintln!(
-                "  {:?}  {:#018x} → not in index — no candidates",
+                "  {:?}  {:#010x} → not in index — no candidates",
                 String::from_utf8_lossy(ng), hash
             ),
             Some((offset, docs)) => eprintln!(
-                "  {:?}  {:#018x} → offset {:#010x} → {} doc(s)",
+                "  {:?}  {:#010x} → offset {:#010x} → {} doc(s)",
                 String::from_utf8_lossy(ng), hash, offset, docs.len()
             ),
         }
