@@ -84,9 +84,11 @@ impl Index {
                     if is_binary(&bytes) || bytes.len() > MAX_FILE_BYTES {
                         return Ok(None);
                     }
-                    let hashes = ngram::extract_all_ngrams(&bytes)
+                    let mut hashes: Vec<u32> = ngram::extract_all_ngrams(&bytes)
                         .map(ngram::hash_ngram)
                         .collect();
+                    hashes.sort_unstable();
+                    hashes.dedup();
                     Ok(Some(hashes))
                 })
                 .collect();
