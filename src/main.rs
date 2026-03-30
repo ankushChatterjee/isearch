@@ -13,7 +13,8 @@ use clap::{Parser, Subcommand};
 use dirs::home_dir;
 use ignore::WalkBuilder;
 use index::{
-    write_bundle, DocId, Index, MmapBundle, PostingsReadTimings, index_bundle_path, pwd_hash,
+    write_bundle, write_paths_and_meta, BuildOutput, DocId, Index, MmapBundle, PostingsReadTimings,
+    SpillOptions, index_bundle_path, pwd_hash,
 };
 /// `./relative/path` under `root`, or the path as given with `/` separators.
 fn query_result_path_display(file_path: &str, root: &Path) -> String {
@@ -46,6 +47,15 @@ enum Commands {
         /// Directory to crawl (respects .gitignore when present).
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Enable spill mode automatically only for projects with at least this many paths.
+        #[arg(long, default_value_t = 100_000)]
+        spill_min_paths: usize,
+        /// Max in-memory pair buffer size before flushing a spill run.
+        #[arg(long, default_value_t = 20_000_000)]
+        spill_max_pairs_in_mem: usize,
+        /// Directory for spill run files. Default is bundle-local temp staging.
+        #[arg(long)]
+        spill_temp_dir: Option<PathBuf>,
     },
     /// Search for literal TEXT in the indexed corpus (uses sparse n-gram intersection, then verifies).
     Query {
@@ -60,12 +70,22 @@ enum Commands {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Index { path } => run_index(path),
+        Commands::Index {
+            path,
+            spill_min_paths,
+            spill_max_pairs_in_mem,
+            spill_temp_dir,
+        } => run_index(path, spill_min_paths, spill_max_pairs_in_mem, spill_temp_dir),
         Commands::Query { text, path } => run_query(text, path),
     }
 }
 
-fn run_index(path: PathBuf) -> io::Result<()> {
+fn run_index(
+    path: PathBuf,
+    spill_min_paths: usize,
+    spill_max_pairs_in_mem: usize,
+    spill_temp_dir: Option<PathBuf>,
+) -> io::Result<()> {
     let root = std::fs::canonicalize(&path).map_err(|e| {
         io::Error::other(format!("canonicalize {}: {e}", path.display()))
     })?;
@@ -92,10 +112,22 @@ fn run_index(path: PathBuf) -> io::Result<()> {
     eprintln!("\r  scanning directory → {} paths", paths.len());
 
     let t_total = Instant::now();
-    let (store, index) = Index::ingest_files(&paths)?;
+    let spill_options = SpillOptions {
+        spill_min_paths,
+        spill_max_pairs_in_mem,
+        spill_temp_dir,
+    };
+    let (store, build) = Index::ingest_files_with_spill_options(&paths, &spill_options, &out_dir)?;
     eprintln!("  build total: {:.2}s", t_total.elapsed().as_secs_f64());
 
-    write_bundle(&out_dir, &index, &store, &root)?;
+    match build {
+        BuildOutput::InMemory(index) => {
+            write_bundle(&out_dir, &index, &store, &root)?;
+        }
+        BuildOutput::SpilledToDisk => {
+            write_paths_and_meta(&out_dir, &store, &root)?;
+        }
+    }
     eprintln!("  wrote bundle under {}", out_dir.display());
 
     Ok(())

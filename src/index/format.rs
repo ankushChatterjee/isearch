@@ -270,6 +270,13 @@ pub fn write_bundle(out_dir: &Path, index: &Index, store: &DocStore, root: &Path
     Ok(())
 }
 
+/// Write `paths.txt` + `meta.txt` into `out_dir` (created if missing).
+pub fn write_paths_and_meta(out_dir: &Path, store: &DocStore, root: &Path) -> io::Result<()> {
+    fs::create_dir_all(out_dir)?;
+    write_paths_file(&out_dir.join(PATHS_FILENAME), store)?;
+    write_meta_file(&out_dir.join(META_FILENAME), root, store.len())
+}
+
 /// **Pt 7:** One contiguous buffer + [`fs::write`] — avoids per-row syscalls.
 fn write_lookup_file(path: &Path, index: &Index) -> io::Result<()> {
     let entries = index.lookup.entries();
@@ -300,7 +307,7 @@ fn write_postings_file(path: &Path, index: &Index) -> io::Result<()> {
 }
 
 /// **Pt 9:** Pre-sized buffer, one [`fs::write`] (no per-line syscalls).
-fn write_paths_file(path: &Path, store: &DocStore) -> io::Result<()> {
+pub(crate) fn write_paths_file(path: &Path, store: &DocStore) -> io::Result<()> {
     let mut nbytes = 0usize;
     for (_, p) in store.iter_paths() {
         nbytes = nbytes.saturating_add(p.len()).saturating_add(1);
@@ -313,7 +320,7 @@ fn write_paths_file(path: &Path, store: &DocStore) -> io::Result<()> {
     fs::write(path, buf)
 }
 
-fn write_meta_file(path: &Path, root: &Path, doc_count: usize) -> io::Result<()> {
+pub(crate) fn write_meta_file(path: &Path, root: &Path, doc_count: usize) -> io::Result<()> {
     let mut f = fs::File::create(path)?;
     writeln!(f, "root={}", root.display())?;
     writeln!(f, "format_version={}", FORMAT_VERSION)?;
