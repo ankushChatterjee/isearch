@@ -44,11 +44,12 @@ impl DocStore {
 
 // ── Lookup table ──────────────────────────────────────────────────────────────
 
-/// One row: maps an n-gram hash to a byte offset in [`PostingsBlob`].
+/// One row: maps an n-gram hash to either an inline singleton doc id or a
+/// byte offset in [`PostingsBlob`], packed into `value`.
 #[derive(Debug, Clone, Copy)]
 pub struct LookupEntry {
     pub hash:   u32,
-    pub offset: u64,
+    pub value:  u32,
 }
 
 /// Sorted array of [`LookupEntry`]; binary-searched at query time.
@@ -67,7 +68,8 @@ pub struct Posting {
 
 // ── Postings blob ─────────────────────────────────────────────────────────────
 
-/// Posting lists written back-to-back: `[count: u32 LE][doc_id: u32 LE] × count`.
+/// Posting lists written back-to-back using:
+/// `[count: varint][delta(doc_id): varint] × count`.
 pub struct PostingsBlob {
     pub(crate) data: Vec<u8>,
 }

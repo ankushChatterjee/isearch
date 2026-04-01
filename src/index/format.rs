@@ -41,7 +41,7 @@ use super::types::{DocStore, Index, LookupEntry};
 // ── Version & magic ───────────────────────────────────────────────────────────
 
 /// Current format version number in file headers.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Lookup-table file: `ISEARCH` + `L` + padding to 8 bytes.
 pub const LOOKUP_MAGIC: [u8; 8] = *b"ISEARCHL";
@@ -70,6 +70,84 @@ pub mod flags {
     // pub const ZSTD_POSTINGS: Flags = 1 << 1;
 }
 
+/// Packed lookup value bit: when set, low 31 bits are an inline singleton
+/// `doc_id`; otherwise low 31 bits are a postings payload offset.
+pub const LOOKUP_INLINE_FLAG: u32 = 1 << 31;
+pub const LOOKUP_VALUE_MASK: u32 = LOOKUP_INLINE_FLAG - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookupValue {
+    InlineDocId(u32),
+    PostingsOffset(u32),
+}
+
+#[inline]
+pub fn decode_lookup_value(value: u32) -> LookupValue {
+    if value & LOOKUP_INLINE_FLAG != 0 {
+        LookupValue::InlineDocId(value & LOOKUP_VALUE_MASK)
+    } else {
+        LookupValue::PostingsOffset(value & LOOKUP_VALUE_MASK)
+    }
+}
+
+#[inline]
+pub fn encode_inline_doc_id(doc_id: u32) -> io::Result<u32> {
+    if doc_id > LOOKUP_VALUE_MASK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "doc_id exceeds 31-bit inline limit",
+        ));
+    }
+    Ok(LOOKUP_INLINE_FLAG | doc_id)
+}
+
+#[inline]
+pub fn encode_postings_offset(offset: u32) -> io::Result<u32> {
+    if offset > LOOKUP_VALUE_MASK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "postings offset exceeds 31-bit limit",
+        ));
+    }
+    Ok(offset)
+}
+
+#[inline]
+pub fn push_u32_varint(buf: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        buf.push(((value as u8) & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+#[inline]
+pub fn read_u32_varint_from_slice(bytes: &[u8], cursor: &mut usize) -> io::Result<u32> {
+    let mut shift = 0u32;
+    let mut out = 0u32;
+    loop {
+        if *cursor >= bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated varint",
+            ));
+        }
+        let b = bytes[*cursor];
+        *cursor += 1;
+        out |= u32::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return Ok(out);
+        }
+        shift += 7;
+        if shift >= 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
+        }
+    }
+}
+
 // ── Shared file header ────────────────────────────────────────────────────────
 
 /// 32-byte header at offset 0 of both lookup and postings files.
@@ -84,7 +162,7 @@ pub mod flags {
 /// | 16     | 8    | `payload_size`   |
 /// | 24     | 8    | `entry_count`    |
 ///
-/// **Lookup file:** `payload_size` must equal `entry_count * 12` (see
+/// **Lookup file:** `payload_size` must equal `entry_count * 8` (see
 /// [`LookupEntryRecord`]). `entry_count` is the number of hash→offset rows.
 ///
 /// **Postings file:** `payload_size` is the byte length of the raw postings
@@ -139,21 +217,22 @@ impl IsearchIndexFileHeader {
 
 // ── Lookup table body ─────────────────────────────────────────────────────────
 
-/// One row in the lookup file body: maps an n-gram hash to a byte offset in
+/// One row in the lookup file body: maps an n-gram hash to either a postings
+/// payload offset or an inline singleton doc id.
 /// the postings file.
 ///
 /// | Offset | Size | Field    |
 /// |--------|------|----------|
 /// | 0      | 4    | `hash`   |
-/// | 4      | 8    | `offset` |
+/// | 4      | 4    | `value`  |
 ///
 /// Rows are stored **sorted by `hash`** ascending for binary search.
-/// Packed so the on-disk row is 12 bytes (no padding between `u32` and `u64`).
+/// Packed so the on-disk row is 8 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct LookupEntryRecord {
     pub hash:   u32,
-    pub offset: u64,
+    pub value:  u32,
 }
 
 impl LookupEntryRecord {
@@ -164,7 +243,7 @@ impl From<LookupEntry> for LookupEntryRecord {
     fn from(e: LookupEntry) -> Self {
         Self {
             hash:   e.hash,
-            offset: e.offset,
+            value:  e.value,
         }
     }
 }
@@ -178,27 +257,44 @@ pub struct LookupTableFile {
 
 // ── Postings blob body ────────────────────────────────────────────────────────
 
-/// One posting list: a length-prefixed run of document ids.
+/// One posting list: varint length + varint d-gap encoded document ids.
 ///
 /// | Part   | Size     | Field        |
 /// |--------|----------|--------------|
-/// | header | 4        | `doc_count`  |
-/// | body   | 4×count  | `doc_id` each|
+/// | header | varint   | `doc_count`  |
+/// | body   | varint×N | `doc_id` d-gaps |
 ///
 /// Lists are concatenated back-to-back with no padding between them.
-/// Offsets in [`LookupEntryRecord`] point to the `doc_count` field.
+/// Offsets in [`LookupEntryRecord`] point to the list start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostingListRecord {
     pub doc_ids: Vec<u32>,
 }
 
 impl PostingListRecord {
-    /// Serialized size in bytes: `4 + 4 * doc_ids.len()`.
+    /// Serialized size in bytes for the varint+d-gap representation.
     #[allow(dead_code)]
-    #[inline]
     pub fn serialized_size(&self) -> usize {
-        4usize.saturating_add(self.doc_ids.len().saturating_mul(4))
+        let mut out = 0usize;
+        out = out.saturating_add(varint_u32_len(self.doc_ids.len() as u32));
+        let mut prev = 0u32;
+        for &doc in &self.doc_ids {
+            let delta = doc.saturating_sub(prev);
+            out = out.saturating_add(varint_u32_len(delta));
+            prev = doc;
+        }
+        out
     }
+}
+
+#[inline]
+fn varint_u32_len(mut v: u32) -> usize {
+    let mut n = 1usize;
+    while v >= 0x80 {
+        n += 1;
+        v >>= 7;
+    }
+    n
 }
 
 /// Logical view of the postings file: header + opaque blob matching today's
@@ -290,7 +386,7 @@ fn write_lookup_file(path: &Path, index: &Index) -> io::Result<()> {
     header.extend_le_to(&mut buf);
     for e in entries {
         buf.extend_from_slice(&e.hash.to_le_bytes());
-        buf.extend_from_slice(&e.offset.to_le_bytes());
+        buf.extend_from_slice(&e.value.to_le_bytes());
     }
     fs::write(path, buf)
 }
@@ -398,7 +494,49 @@ mod tests {
     }
 
     #[test]
-    fn lookup_entry_record_is_packed_12_bytes() {
-        assert_eq!(LookupEntryRecord::SIZE, 12);
+    fn lookup_entry_record_is_packed_8_bytes() {
+        assert_eq!(LookupEntryRecord::SIZE, 8);
+    }
+
+    #[test]
+    fn lookup_value_roundtrip_inline_and_offset() {
+        let inline = encode_inline_doc_id(42).unwrap();
+        assert_eq!(decode_lookup_value(inline), LookupValue::InlineDocId(42));
+        let offset = encode_postings_offset(77).unwrap();
+        assert_eq!(decode_lookup_value(offset), LookupValue::PostingsOffset(77));
+    }
+
+    #[test]
+    fn varint_roundtrip() {
+        let vals = [0u32, 1, 127, 128, 16_384, u32::MAX];
+        let mut buf = Vec::new();
+        for v in vals {
+            push_u32_varint(&mut buf, v);
+        }
+        let mut cur = 0usize;
+        for v in vals {
+            let got = read_u32_varint_from_slice(&buf, &mut cur).unwrap();
+            assert_eq!(got, v);
+        }
+    }
+
+    #[test]
+    fn varint_decode_rejects_truncated_and_overflow() {
+        let mut cur = 0usize;
+        let e = read_u32_varint_from_slice(&[0x80], &mut cur).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+
+        let mut cur = 0usize;
+        let e = read_u32_varint_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01], &mut cur)
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn lookup_value_rejects_out_of_range() {
+        let e = encode_inline_doc_id(LOOKUP_VALUE_MASK + 1).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        let e = encode_postings_offset(LOOKUP_VALUE_MASK + 1).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 }

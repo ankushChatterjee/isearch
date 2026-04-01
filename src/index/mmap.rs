@@ -15,8 +15,8 @@ use std::time::Instant;
 use memmap2::MmapOptions;
 
 use super::format::{
-    decode_file_header, read_paths_lines, LookupEntryRecord, LOOKUP_FILENAME, LOOKUP_MAGIC,
-    PATHS_FILENAME, POSTINGS_FILENAME, POSTINGS_MAGIC,
+    decode_file_header, decode_lookup_value, read_paths_lines, LookupEntryRecord, LookupValue,
+    LOOKUP_FILENAME, LOOKUP_MAGIC, PATHS_FILENAME, POSTINGS_FILENAME, POSTINGS_MAGIC,
 };
 use super::reader::intersect_sorted;
 use super::types::DocId;
@@ -149,8 +149,8 @@ impl MmapBundle {
         ))
     }
 
-    /// Binary search on the mmap’d lookup body; returns payload-relative offset into postings.
-    fn lookup_hash(&self, hash: u32) -> Option<u64> {
+    /// Binary search on the mmap’d lookup body; returns decoded lookup value.
+    fn lookup_hash(&self, hash: u32) -> Option<LookupValue> {
         let body = &self.lookup[HEADER_LEN..];
         let n = body.len() / LookupEntryRecord::SIZE;
         let mut lo = 0usize;
@@ -164,32 +164,36 @@ impl MmapBundle {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
-                    return Some(u64::from_le_bytes(row[4..12].try_into().ok()?));
+                    return Some(decode_lookup_value(u32::from_le_bytes(
+                        row[4..8].try_into().ok()?,
+                    )));
                 }
             }
         }
         None
     }
 
-    /// Read `[count: u32 LE][doc_id: u32 LE]…` at payload offset `offset` from the postings file.
-    fn read_posting_list(&self, offset: u64) -> io::Result<Vec<DocId>> {
+    /// Read `[count: varint][delta(doc): varint]...` at payload offset `offset`.
+    fn read_posting_list(&self, offset: u32) -> io::Result<Vec<DocId>> {
         let abs = self
             .postings_payload_base
-            .checked_add(offset)
+            .checked_add(u64::from(offset))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting offset overflow"))?;
-        let mut word = [0u8; 4];
-        read_exact_at(&self.postings, &mut word, abs)?;
-        let count = u32::from_le_bytes(word) as usize;
-
-        let bytes_len = count
-            .checked_mul(4)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting doc bytes overflow"))?;
-        let mut docs_bytes = vec![0u8; bytes_len];
-        read_exact_at(&self.postings, &mut docs_bytes, abs + 4)?;
+        let (count_u32, mut cur) = read_u32_varint_at(&self.postings, abs)?;
+        let count = usize::try_from(count_u32).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "posting count does not fit usize")
+        })?;
 
         let mut docs = Vec::with_capacity(count);
-        for chunk in docs_bytes.chunks_exact(4) {
-            docs.push(DocId(u32::from_le_bytes(chunk.try_into().unwrap())));
+        let mut prev = 0u32;
+        for _ in 0..count {
+            let (delta, next) = read_u32_varint_at(&self.postings, cur)?;
+            cur = next;
+            let doc = prev
+                .checked_add(delta)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "doc_id overflow"))?;
+            docs.push(DocId(doc));
+            prev = doc;
         }
         Ok(docs)
     }
@@ -200,16 +204,22 @@ impl MmapBundle {
         let mut postings_lists_read = 0u32;
         let mut result: Option<Vec<DocId>> = None;
         for &hash in hashes {
-            let Some(off) = self.lookup_hash(hash) else {
+            let Some(value) = self.lookup_hash(hash) else {
                 return Ok((Vec::new(), PostingsReadTimings {
                     ms: postings_read_ms,
                     postings_lists_read,
                 }));
             };
             let t = Instant::now();
-            let docs = self.read_posting_list(off)?;
-            postings_read_ms += ms(t);
-            postings_lists_read += 1;
+            let docs = match value {
+                LookupValue::InlineDocId(doc_id) => vec![DocId(doc_id)],
+                LookupValue::PostingsOffset(off) => {
+                    let docs = self.read_posting_list(off)?;
+                    postings_read_ms += ms(t);
+                    postings_lists_read += 1;
+                    docs
+                }
+            };
             result = Some(match result {
                 None => docs,
                 Some(c) => intersect_sorted(&c, &docs),
@@ -242,6 +252,28 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
     Ok(())
 }
 
+#[cfg(unix)]
+fn read_u32_varint_at(file: &File, mut offset: u64) -> io::Result<(u32, u64)> {
+    let mut shift = 0u32;
+    let mut out = 0u32;
+    loop {
+        let mut b = [0u8; 1];
+        read_exact_at(file, &mut b, offset)?;
+        offset = offset.saturating_add(1);
+        out |= u32::from(b[0] & 0x7f) << shift;
+        if b[0] & 0x80 == 0 {
+            return Ok((out, offset));
+        }
+        shift += 7;
+        if shift >= 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
@@ -249,4 +281,26 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let mut f = file.try_clone()?;
     f.seek(SeekFrom::Start(offset))?;
     f.read_exact(buf)
+}
+
+#[cfg(not(unix))]
+fn read_u32_varint_at(file: &File, mut offset: u64) -> io::Result<(u32, u64)> {
+    let mut shift = 0u32;
+    let mut out = 0u32;
+    loop {
+        let mut b = [0u8; 1];
+        read_exact_at(file, &mut b, offset)?;
+        offset = offset.saturating_add(1);
+        out |= u32::from(b[0] & 0x7f) << shift;
+        if b[0] & 0x80 == 0 {
+            return Ok((out, offset));
+        }
+        shift += 7;
+        if shift >= 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
+        }
+    }
 }

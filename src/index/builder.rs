@@ -12,6 +12,7 @@ use rayon::prelude::*;
 
 use crate::ngram;
 
+use super::format::{encode_inline_doc_id, encode_postings_offset, push_u32_varint, LOOKUP_VALUE_MASK};
 use super::spill;
 use super::types::{DocId, DocStore, Index, LookupTable, Posting, PostingsBlob};
 
@@ -47,25 +48,74 @@ impl PostingsBlob {
         Self { data: Vec::new() }
     }
 
-    /// Append one posting list; returns the byte offset written.
-    pub(crate) fn append(&mut self, posting: &Posting) -> u64 {
-        let offset = self.data.len() as u64;
-        self.data.extend_from_slice(&(posting.doc_ids.len() as u32).to_le_bytes());
-        for &DocId(id) in &posting.doc_ids {
-            self.data.extend_from_slice(&id.to_le_bytes());
+    /// Append one non-singleton posting list in varint+d-gap form.
+    /// Returns payload-relative byte offset.
+    pub(crate) fn append(&mut self, posting: &Posting) -> io::Result<u32> {
+        let offset = self.data.len();
+        if offset > LOOKUP_VALUE_MASK as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "postings payload exceeds 31-bit offset limit",
+            ));
         }
-        offset
+        if posting.doc_ids.len() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "append called with singleton/empty posting",
+            ));
+        }
+
+        let count = u32::try_from(posting.doc_ids.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "posting list too long")
+        })?;
+        push_u32_varint(&mut self.data, count);
+
+        let mut prev = 0u32;
+        for (i, &DocId(id)) in posting.doc_ids.iter().enumerate() {
+            if id > LOOKUP_VALUE_MASK {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "doc_id exceeds 31-bit limit",
+                ));
+            }
+            if i > 0 && id < prev {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "posting doc_ids must be sorted ascending",
+                ));
+            }
+            let delta = id - prev;
+            push_u32_varint(&mut self.data, delta);
+            prev = id;
+        }
+        Ok(offset as u32)
     }
 
     /// Build blob + lookup table from postings sorted by hash.
-    pub(crate) fn from_postings(postings: &[Posting]) -> (Self, LookupTable) {
+    pub(crate) fn from_postings(postings: &[Posting]) -> io::Result<(Self, LookupTable, u64)> {
         let mut blob   = Self::new();
         let mut lookup = LookupTable::new();
+        let mut inline_singletons = 0u64;
         for posting in postings {
-            let offset = blob.append(posting);
-            lookup.push(posting.hash, offset);
+            let value = match posting.doc_ids.as_slice() {
+                [] => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "empty posting list",
+                    ));
+                }
+                [DocId(id)] => {
+                    inline_singletons += 1;
+                    encode_inline_doc_id(*id)?
+                }
+                _ => {
+                    let offset = blob.append(posting)?;
+                    encode_postings_offset(offset)?
+                }
+            };
+            lookup.push(posting.hash, value);
         }
-        (blob, lookup)
+        Ok((blob, lookup, inline_singletons))
     }
 }
 
@@ -74,8 +124,8 @@ impl LookupTable {
         Self { entries: Vec::new() }
     }
 
-    pub(crate) fn push(&mut self, hash: u32, offset: u64) {
-        self.entries.push(super::types::LookupEntry { hash, offset });
+    pub(crate) fn push(&mut self, hash: u32, value: u32) {
+        self.entries.push(super::types::LookupEntry { hash, value });
     }
 }
 
@@ -140,7 +190,7 @@ impl Index {
             t.elapsed().as_secs_f64()
         );
 
-        let index = Self::build_from_pairs(pairs);
+        let index = Self::build_from_pairs(pairs)?;
         Ok((store, index))
     }
 
@@ -234,23 +284,24 @@ impl Index {
             let t = Instant::now();
             let stats = spill::merge_runs_to_index_files(&state.runs, bundle_dir)?;
             eprintln!(
-                "\r  [2/5] merged {} run(s) → {} lookup row(s), {} unique / {} merged pairs, postings {} bytes  ({:.2}s)",
+                "\r  [2/5] merged {} run(s) → {} lookup row(s), {} unique / {} merged pairs, postings {} bytes, inline singletons {}  ({:.2}s)",
                 stats.run_count,
                 stats.lookup_rows,
                 stats.unique_pairs,
                 stats.merged_pairs,
                 stats.postings_payload_bytes,
+                stats.inline_singletons,
                 t.elapsed().as_secs_f64()
             );
             state.cleanup_success();
             return Ok((store, BuildOutput::SpilledToDisk));
         }
 
-        let index = Self::build_from_pairs(pairs);
+        let index = Self::build_from_pairs(pairs)?;
         Ok((store, BuildOutput::InMemory(index)))
     }
 
-    fn build_from_pairs(mut pairs: Vec<(u32, DocId)>) -> Self {
+    fn build_from_pairs(mut pairs: Vec<(u32, DocId)>) -> io::Result<Self> {
         eprint!("  [2/5] sorting {} pairs...", pairs.len());
         let _ = io::stderr().flush();
         let t = Instant::now();
@@ -288,15 +339,16 @@ impl Index {
         eprint!("  [5/5] serializing postings blob...");
         let _ = io::stderr().flush();
         let t = Instant::now();
-        let (postings, lookup) = PostingsBlob::from_postings(&postings_list);
+        let (postings, lookup, inline_singletons) = PostingsBlob::from_postings(&postings_list)?;
         eprintln!(
-            "\r  [5/5] serialized → lookup {} entries ({} bytes), postings {} bytes  ({:.2}s)",
+            "\r  [5/5] serialized → lookup {} entries ({} bytes), postings {} bytes, inline singletons {}  ({:.2}s)",
             lookup.len(),
             lookup.byte_size(),
             postings.byte_size(),
+            inline_singletons,
             t.elapsed().as_secs_f64()
         );
-        Self { lookup, postings }
+        Ok(Self { lookup, postings })
     }
 }
 

@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use super::format::{
-    flags, IsearchIndexFileHeader, LOOKUP_FILENAME, LookupEntryRecord, POSTINGS_FILENAME,
+    encode_inline_doc_id, encode_postings_offset, flags, push_u32_varint, IsearchIndexFileHeader,
+    LOOKUP_FILENAME, LookupEntryRecord, LOOKUP_VALUE_MASK, POSTINGS_FILENAME,
 };
 use super::types::DocId;
 
@@ -20,6 +21,7 @@ pub struct MergeStats {
     pub unique_pairs: u64,
     pub lookup_rows: u64,
     pub postings_payload_bytes: u64,
+    pub inline_singletons: u64,
 }
 
 pub fn flush_run(dir: &Path, run_idx: usize, pairs: &mut Vec<(u32, DocId)>) -> io::Result<PathBuf> {
@@ -62,6 +64,7 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
     let mut unique_pairs = 0u64;
     let mut lookup_rows = 0u64;
     let mut postings_payload_bytes = 0u64;
+    let mut inline_singletons = 0u64;
     let mut last_pair: Option<(u32, u32)> = None;
 
     let mut current_hash: Option<u32> = None;
@@ -87,6 +90,7 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
                         &mut postings_w,
                         &mut postings_payload_bytes,
                         &mut lookup_rows,
+                        &mut inline_singletons,
                     )?;
                     current_docs.clear();
                     current_hash = Some(item.hash);
@@ -108,6 +112,7 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
             &mut postings_w,
             &mut postings_payload_bytes,
             &mut lookup_rows,
+            &mut inline_singletons,
         )?;
     }
 
@@ -138,6 +143,7 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
         unique_pairs,
         lookup_rows,
         postings_payload_bytes,
+        inline_singletons,
     })
 }
 
@@ -155,19 +161,60 @@ fn flush_posting(
     postings_w: &mut BufWriter<File>,
     postings_payload_bytes: &mut u64,
     lookup_rows: &mut u64,
+    inline_singletons: &mut u64,
 ) -> io::Result<()> {
-    let offset = *postings_payload_bytes;
-    let count = docs.len() as u32;
-    postings_w.write_all(&count.to_le_bytes())?;
-    for &doc in docs {
-        postings_w.write_all(&doc.to_le_bytes())?;
+    if docs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty posting list",
+        ));
     }
-    *postings_payload_bytes = postings_payload_bytes
-        .checked_add(4u64 + 4u64 * docs.len() as u64)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "postings payload overflow"))?;
+
+    let value = if docs.len() == 1 {
+        let doc = docs[0];
+        *inline_singletons += 1;
+        encode_inline_doc_id(doc)?
+    } else {
+        let offset = *postings_payload_bytes;
+        if offset > LOOKUP_VALUE_MASK as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "postings payload exceeds 31-bit offset limit",
+            ));
+        }
+
+        let mut buf = Vec::new();
+        let count = u32::try_from(docs.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "posting list too long")
+        })?;
+        push_u32_varint(&mut buf, count);
+        let mut prev = 0u32;
+        for (i, &doc) in docs.iter().enumerate() {
+            if doc > LOOKUP_VALUE_MASK {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "doc_id exceeds 31-bit limit",
+                ));
+            }
+            if i > 0 && doc < prev {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "posting doc_ids must be sorted ascending",
+                ));
+            }
+            let delta = doc - prev;
+            push_u32_varint(&mut buf, delta);
+            prev = doc;
+        }
+        postings_w.write_all(&buf)?;
+        *postings_payload_bytes = postings_payload_bytes
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "postings payload overflow"))?;
+        encode_postings_offset(offset as u32)?
+    };
 
     lookup_w.write_all(&hash.to_le_bytes())?;
-    lookup_w.write_all(&offset.to_le_bytes())?;
+    lookup_w.write_all(&value.to_le_bytes())?;
     *lookup_rows += 1;
     Ok(())
 }
