@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use super::format::{
     encode_inline_doc_id, encode_postings_offset, flags, push_u32_varint, IsearchIndexFileHeader,
-    LOOKUP_FILENAME, LookupEntryRecord, LOOKUP_VALUE_MASK, POSTINGS_FILENAME,
+    LookupEntryRecord, LOOKUP_FILENAME, LOOKUP_VALUE_MASK, POSTINGS_FILENAME,
 };
 use super::types::DocId;
 
@@ -56,7 +56,11 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
     let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
     for (idx, reader) in readers.iter_mut().enumerate() {
         if let Some((hash, doc_id)) = reader.next_record()? {
-            heap.push(HeapItem { hash, doc_id, run_idx: idx });
+            heap.push(HeapItem {
+                hash,
+                doc_id,
+                run_idx: idx,
+            });
         }
     }
 
@@ -100,7 +104,11 @@ pub fn merge_runs_to_index_files(runs: &[PathBuf], out_dir: &Path) -> io::Result
         }
 
         if let Some((hash, doc_id)) = readers[item.run_idx].next_record()? {
-            heap.push(HeapItem { hash, doc_id, run_idx: item.run_idx });
+            heap.push(HeapItem {
+                hash,
+                doc_id,
+                run_idx: item.run_idx,
+            });
         }
     }
 
@@ -184,9 +192,8 @@ fn flush_posting(
         }
 
         let mut buf = Vec::new();
-        let count = u32::try_from(docs.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "posting list too long")
-        })?;
+        let count = u32::try_from(docs.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "posting list too long"))?;
         push_u32_varint(&mut buf, count);
         let mut prev = 0u32;
         for (i, &doc) in docs.iter().enumerate() {
@@ -209,7 +216,9 @@ fn flush_posting(
         postings_w.write_all(&buf)?;
         *postings_payload_bytes = postings_payload_bytes
             .checked_add(buf.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "postings payload overflow"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "postings payload overflow")
+            })?;
         encode_postings_offset(offset as u32)?
     };
 
@@ -283,7 +292,12 @@ mod tests {
     #[test]
     fn run_flush_and_merge_are_sorted_and_unique() {
         let dir = temp_dir("isearch-spill-test");
-        let mut p1 = vec![(3u32, DocId(9)), (1, DocId(2)), (1, DocId(2)), (1, DocId(3))];
+        let mut p1 = vec![
+            (3u32, DocId(9)),
+            (1, DocId(2)),
+            (1, DocId(2)),
+            (1, DocId(3)),
+        ];
         let mut p2 = vec![(2u32, DocId(4)), (3, DocId(9)), (3, DocId(10))];
 
         let r1 = flush_run(&dir, 0, &mut p1).unwrap();

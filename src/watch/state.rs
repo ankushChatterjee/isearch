@@ -55,7 +55,10 @@ impl WatchState {
 
         let magic = read_exact_array::<8>(&bytes, &mut cur)?;
         if magic != STATE_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid watch_state magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid watch_state magic",
+            ));
         }
         let version = read_u32(&bytes, &mut cur)?;
         if version != STATE_VERSION {
@@ -172,7 +175,6 @@ impl WatchState {
             self.dirty = true;
         }
     }
-
 }
 
 pub fn now_unix_secs() -> u64 {

@@ -31,8 +31,7 @@ pub fn extract_all_ngrams(text: &[u8]) -> impl Iterator<Item = &[u8]> {
             // Bigrams (j == i+1) and trigrams (j == i+2) are always valid: no interior pairs
             // exist, so "strictly greater than all interior weights" holds vacuously.
             // For longer spans, both boundary weights must exceed the MAX interior weight.
-            let valid = j <= i + 2
-                || (w_start > max_interior && w_end > max_interior);
+            let valid = j <= i + 2 || (w_start > max_interior && w_end > max_interior);
 
             if valid {
                 out.push(&text[i..=j]);
@@ -58,7 +57,9 @@ pub fn extract_all_ngrams(text: &[u8]) -> impl Iterator<Item = &[u8]> {
 // Greedy: at each uncovered position, pick the longest valid n-gram.
 pub fn covering_ngrams(text: &[u8]) -> Vec<&[u8]> {
     let n = text.len();
-    if n < 2 { return vec![text]; } // too short — just use the whole thing
+    if n < 2 {
+        return vec![text];
+    } // too short — just use the whole thing
 
     let weights: Vec<u32> = (0..n - 1)
         .map(|i| pair_weight(text[i], text[i + 1]))
@@ -74,12 +75,17 @@ pub fn covering_ngrams(text: &[u8]) -> Vec<&[u8]> {
 
         for j in (pos + 1)..n {
             let w_start = if pos < weights.len() { weights[pos] } else { 0 };
-            let w_end = if j - 1 < weights.len() { weights[j - 1] } else { 0 };
+            let w_end = if j - 1 < weights.len() {
+                weights[j - 1]
+            } else {
+                0
+            };
 
-            let valid = j <= pos + 2
-                || (w_start > max_interior && w_end > max_interior);
+            let valid = j <= pos + 2 || (w_start > max_interior && w_end > max_interior);
 
-            if valid { best_end = j; }
+            if valid {
+                best_end = j;
+            }
 
             if j >= pos + 2 {
                 max_interior = max_interior.max(weights[j - 1]);

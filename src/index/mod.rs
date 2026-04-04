@@ -8,8 +8,8 @@ pub mod reader;
 pub mod spill;
 pub mod types;
 
-pub use format::{index_bundle_path, pwd_hash, write_bundle};
-pub use format::write_paths_and_meta;
 pub use builder::{BuildOutput, SpillOptions};
+pub use format::write_paths_and_meta;
+pub use format::{index_bundle_path, pwd_hash, write_bundle};
 pub use mmap::{MmapBundle, PostingsReadTimings};
 pub use types::{DocId, Index};

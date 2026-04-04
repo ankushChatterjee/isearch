@@ -7,14 +7,16 @@ pub mod state;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 
-use crate::index::format::{read_paths_lines, LOOKUP_FILENAME, META_FILENAME, PATHS_FILENAME, POSTINGS_FILENAME};
+use crate::index::format::{
+    read_paths_lines, LOOKUP_FILENAME, META_FILENAME, PATHS_FILENAME, POSTINGS_FILENAME,
+};
 
 use self::apply::{apply_actions, fingerprint};
 use self::delta::{DeltaOp, DeltaWriter, DELTA_FILENAME};
@@ -24,6 +26,7 @@ use self::state::WatchState;
 const WATCH_STATE_FILENAME: &str = "watch_state.bin";
 const WATCH_LOCK_FILENAME: &str = ".watch.lock";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+static WATCH_LOG_TO_STDERR: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Clone)]
 pub struct WatchConfig {
@@ -33,9 +36,28 @@ pub struct WatchConfig {
     pub compact_interval_secs: u64,
     pub max_batch_files: usize,
     pub verbose: bool,
+    pub log_to_stderr: bool,
+    pub status_tx: Option<mpsc::Sender<WatchStatus>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchPhase {
+    Bootstrapping,
+    Idle,
+    Updating,
+    Compacting,
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchStatus {
+    pub phase: WatchPhase,
+    pub changed_paths: usize,
+    pub delta_ops: usize,
 }
 
 pub fn run(cfg: WatchConfig) -> io::Result<()> {
+    WATCH_LOG_TO_STDERR.store(cfg.log_to_stderr, Ordering::Relaxed);
+    emit_status(&cfg, WatchPhase::Bootstrapping, 0, 0);
     let _lock = WatchLock::acquire(&cfg.bundle_dir.join(WATCH_LOCK_FILENAME))?;
     log_watch(&format!(
         "lock acquired at {}",
@@ -102,6 +124,7 @@ pub fn run(cfg: WatchConfig) -> io::Result<()> {
         cfg.compact_interval_secs,
         cfg.max_batch_files
     ));
+    emit_status(&cfg, WatchPhase::Idle, 0, 0);
 
     while !should_stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -124,6 +147,7 @@ pub fn run(cfg: WatchConfig) -> io::Result<()> {
 
         let ready = coalescer.drain_ready(Instant::now(), cfg.max_batch_files);
         if !ready.is_empty() {
+            emit_status(&cfg, WatchPhase::Updating, ready.len(), 0);
             for action in &ready {
                 log_watch(&format!("change -> {}", action_display(action)));
             }
@@ -138,18 +162,29 @@ pub fn run(cfg: WatchConfig) -> io::Result<()> {
                     ops.len(),
                     state.last_delta_offset
                 ));
+                emit_status(&cfg, WatchPhase::Updating, ready.len(), ops.len());
             } else {
                 log_watch(&format!(
                     "applied {} path change(s) -> 0 delta op(s) (no-op after diff)",
                     ready.len()
                 ));
+                emit_status(&cfg, WatchPhase::Updating, ready.len(), 0);
             }
+            emit_status(&cfg, WatchPhase::Idle, 0, 0);
         }
 
         if last_compact.elapsed() >= Duration::from_secs(cfg.compact_interval_secs.max(1)) {
+            emit_status(&cfg, WatchPhase::Compacting, 0, 0);
             log_watch("compaction started");
-            compact::compact(&cfg.bundle_dir, &cfg.root, &state_path, &delta_path, &mut state)?;
+            compact::compact(
+                &cfg.bundle_dir,
+                &cfg.root,
+                &state_path,
+                &delta_path,
+                &mut state,
+            )?;
             log_watch("compaction finished");
+            emit_status(&cfg, WatchPhase::Idle, 0, 0);
             last_compact = Instant::now();
             last_checkpoint = Instant::now();
             continue;
@@ -168,6 +203,16 @@ pub fn run(cfg: WatchConfig) -> io::Result<()> {
     }
     log_watch("watch loop exited cleanly");
     Ok(())
+}
+
+fn emit_status(cfg: &WatchConfig, phase: WatchPhase, changed_paths: usize, delta_ops: usize) {
+    if let Some(tx) = &cfg.status_tx {
+        let _ = tx.send(WatchStatus {
+            phase,
+            changed_paths,
+            delta_ops,
+        });
+    }
 }
 
 fn bootstrap_state(root: &Path, bundle_dir: &Path) -> io::Result<WatchState> {
@@ -281,7 +326,9 @@ fn action_display(action: &FileAction) -> String {
 }
 
 fn log_watch(msg: &str) {
-    eprintln!("[watch] {msg}");
+    if WATCH_LOG_TO_STDERR.load(Ordering::Relaxed) {
+        eprintln!("[watch] {msg}");
+    }
 }
 
 struct WatchLock {

@@ -48,8 +48,8 @@ impl DocStore {
 /// byte offset in [`PostingsBlob`], packed into `value`.
 #[derive(Debug, Clone, Copy)]
 pub struct LookupEntry {
-    pub hash:   u32,
-    pub value:  u32,
+    pub hash: u32,
+    pub value: u32,
 }
 
 /// Sorted array of [`LookupEntry`]; binary-searched at query time.
@@ -62,7 +62,7 @@ pub struct LookupTable {
 /// One distinct n-gram hash and the documents that contain it, before serialization.
 #[derive(Debug)]
 pub struct Posting {
-    pub hash:    u32,
+    pub hash: u32,
     pub doc_ids: Vec<DocId>,
 }
 
@@ -78,6 +78,6 @@ pub struct PostingsBlob {
 
 /// In-memory inverted index: lookup table + postings blob.
 pub struct Index {
-    pub lookup:   LookupTable,
+    pub lookup: LookupTable,
     pub postings: PostingsBlob,
 }

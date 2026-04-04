@@ -170,13 +170,13 @@ pub fn read_u32_varint_from_slice(bytes: &[u8], cursor: &mut usize) -> io::Resul
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct IsearchIndexFileHeader {
-    pub magic:          [u8; 8],
+    pub magic: [u8; 8],
     pub format_version: u32,
-    pub flags:          u32,
+    pub flags: u32,
     /// Bytes of payload following this header (the body).
-    pub payload_size:   u64,
+    pub payload_size: u64,
     /// Lookup: number of [`LookupEntryRecord`] rows. Postings: `0` (unused).
-    pub entry_count:    u64,
+    pub entry_count: u64,
 }
 
 impl IsearchIndexFileHeader {
@@ -231,8 +231,8 @@ impl IsearchIndexFileHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct LookupEntryRecord {
-    pub hash:   u32,
-    pub value:  u32,
+    pub hash: u32,
+    pub value: u32,
 }
 
 impl LookupEntryRecord {
@@ -242,8 +242,8 @@ impl LookupEntryRecord {
 impl From<LookupEntry> for LookupEntryRecord {
     fn from(e: LookupEntry) -> Self {
         Self {
-            hash:   e.hash,
-            value:  e.value,
+            hash: e.hash,
+            value: e.value,
         }
     }
 }
@@ -337,7 +337,12 @@ pub fn index_bundle_path(home: &Path, pwd_hash: &str) -> PathBuf {
 /// Write lookup + postings + `paths.txt` + `meta.txt` into `out_dir` (created if missing).
 ///
 /// Prints **wall-clock time for actual file I/O** (and per-file breakdown) to stderr.
-pub fn write_bundle(out_dir: &Path, index: &Index, store: &DocStore, root: &Path) -> io::Result<()> {
+pub fn write_bundle(
+    out_dir: &Path,
+    index: &Index,
+    store: &DocStore,
+    root: &Path,
+) -> io::Result<()> {
     let t_wall = Instant::now();
     fs::create_dir_all(out_dir)?;
 
@@ -394,8 +399,7 @@ fn write_lookup_file(path: &Path, index: &Index) -> io::Result<()> {
 /// **Pt 8:** Header + postings payload in one buffer, single [`fs::write`].
 fn write_postings_file(path: &Path, index: &Index) -> io::Result<()> {
     let payload = index.postings.as_bytes();
-    let header =
-        IsearchIndexFileHeader::postings_new(payload.len() as u64, flags::NONE);
+    let header = IsearchIndexFileHeader::postings_new(payload.len() as u64, flags::NONE);
     let mut buf = Vec::with_capacity(size_of::<IsearchIndexFileHeader>() + payload.len());
     header.extend_le_to(&mut buf);
     buf.extend_from_slice(payload);
@@ -437,9 +441,9 @@ pub(crate) fn decode_file_header(
             "file too short for 32-byte header",
         ));
     }
-    let magic: [u8; 8] = file_bytes[0..8].try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "invalid magic length")
-    })?;
+    let magic: [u8; 8] = file_bytes[0..8]
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid magic length"))?;
     if magic != expected_magic {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

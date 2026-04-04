@@ -55,7 +55,11 @@ fn apply_upsert(state: &mut WatchState, path: &Path, ops: &mut Vec<DeltaOp>) -> 
             path: path_s.clone(),
         });
     }
-    let was_tombstone = state.docs.get(&doc_id).map(|d| d.tombstone).unwrap_or(false);
+    let was_tombstone = state
+        .docs
+        .get(&doc_id)
+        .map(|d| d.tombstone)
+        .unwrap_or(false);
     if was_tombstone {
         if let Some(doc) = state.docs.get_mut(&doc_id) {
             doc.tombstone = false;
@@ -97,10 +101,7 @@ fn apply_delete(state: &mut WatchState, path: &Path, ops: &mut Vec<DeltaOp>) {
         return;
     }
     for h in &doc.hashes {
-        ops.push(DeltaOp::RemoveHash {
-            doc_id,
-            hash: *h,
-        });
+        ops.push(DeltaOp::RemoveHash { doc_id, hash: *h });
     }
     ops.push(DeltaOp::TombstoneDoc { doc_id });
     doc.tombstone = true;

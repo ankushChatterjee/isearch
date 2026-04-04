@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use notify::{event::ModifyKind, Event, EventKind, event::RenameMode};
+use notify::{event::ModifyKind, event::RenameMode, Event, EventKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileAction {
@@ -132,7 +132,10 @@ mod tests {
         let now = Instant::now();
         let p = PathBuf::from("/tmp/file.txt");
         c.push(FileAction::Upsert(p.clone()), now);
-        c.push(FileAction::Upsert(p.clone()), now + Duration::from_millis(20));
+        c.push(
+            FileAction::Upsert(p.clone()),
+            now + Duration::from_millis(20),
+        );
         assert!(c
             .drain_ready(now + Duration::from_millis(60), 100)
             .is_empty());

@@ -2,12 +2,13 @@
 //! `isearch query` — load that index, intersect sparse n-gram postings, verify literally.
 
 mod index;
+mod live;
 mod ngram;
 mod verify;
 mod watch;
 
-use std::io::{self, Write};
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -15,8 +16,8 @@ use clap::{Parser, Subcommand};
 use dirs::home_dir;
 use ignore::WalkBuilder;
 use index::{
-    write_bundle, write_paths_and_meta, BuildOutput, DocId, Index, MmapBundle, PostingsReadTimings,
-    SpillOptions, index_bundle_path, pwd_hash,
+    index_bundle_path, pwd_hash, write_bundle, write_paths_and_meta, BuildOutput, DocId, Index,
+    MmapBundle, PostingsReadTimings, SpillOptions,
 };
 /// `./relative/path` under `root`, or the path as given with `/` separators.
 fn query_result_path_display(file_path: &str, root: &Path) -> String {
@@ -85,6 +86,24 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         verbose: bool,
     },
+    /// Launch interactive live-search TUI with embedded watcher + status bar.
+    Live {
+        /// Directory to watch/search recursively.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Debounce interval for coalescing noisy editor events.
+        #[arg(long, default_value_t = 100)]
+        debounce_ms: u64,
+        /// Timer-based compaction interval in seconds.
+        #[arg(long, default_value_t = 60)]
+        compact_interval_secs: u64,
+        /// Max number of coalesced paths applied per event-loop iteration.
+        #[arg(long, default_value_t = 256)]
+        max_batch_files: usize,
+        /// Maximum result rows shown in the TUI list.
+        #[arg(long, default_value_t = 400)]
+        max_results: usize,
+    },
 }
 
 fn main() -> io::Result<()> {
@@ -95,7 +114,12 @@ fn main() -> io::Result<()> {
             spill_min_paths,
             spill_max_pairs_in_mem,
             spill_temp_dir,
-        } => run_index(path, spill_min_paths, spill_max_pairs_in_mem, spill_temp_dir),
+        } => run_index(
+            path,
+            spill_min_paths,
+            spill_max_pairs_in_mem,
+            spill_temp_dir,
+        ),
         Commands::Query { text, path } => run_query(text, path),
         Commands::Watch {
             path,
@@ -103,7 +127,26 @@ fn main() -> io::Result<()> {
             compact_interval_secs,
             max_batch_files,
             verbose,
-        } => run_watch(path, debounce_ms, compact_interval_secs, max_batch_files, verbose),
+        } => run_watch(
+            path,
+            debounce_ms,
+            compact_interval_secs,
+            max_batch_files,
+            verbose,
+        ),
+        Commands::Live {
+            path,
+            debounce_ms,
+            compact_interval_secs,
+            max_batch_files,
+            max_results,
+        } => run_live(
+            path,
+            debounce_ms,
+            compact_interval_secs,
+            max_batch_files,
+            max_results,
+        ),
     }
 }
 
@@ -113,9 +156,8 @@ fn run_index(
     spill_max_pairs_in_mem: usize,
     spill_temp_dir: Option<PathBuf>,
 ) -> io::Result<()> {
-    let root = std::fs::canonicalize(&path).map_err(|e| {
-        io::Error::other(format!("canonicalize {}: {e}", path.display()))
-    })?;
+    let root = std::fs::canonicalize(&path)
+        .map_err(|e| io::Error::other(format!("canonicalize {}: {e}", path.display())))?;
     let hash = pwd_hash(&root);
     let home = home_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve home directory")
@@ -170,9 +212,8 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
 
     let t_query_total = Instant::now();
 
-    let root = std::fs::canonicalize(&path).map_err(|e| {
-        io::Error::other(format!("canonicalize {}: {e}", path.display()))
-    })?;
+    let root = std::fs::canonicalize(&path)
+        .map_err(|e| io::Error::other(format!("canonicalize {}: {e}", path.display())))?;
     let hash = pwd_hash(&root);
     let home = home_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve home directory")
@@ -212,9 +253,7 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
             let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
             docs.iter()
                 .filter(|(_, _, doc_hashes)| {
-                    hashes
-                        .iter()
-                        .all(|h| doc_hashes.binary_search(h).is_ok())
+                    hashes.iter().all(|h| doc_hashes.binary_search(h).is_ok())
                 })
                 .map(|(doc_id, _, _)| DocId(*doc_id))
                 .collect()
@@ -291,15 +330,9 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
     let total_s = t_query_total.elapsed().as_secs_f64();
     let total_ms = total_s * 1000.0;
     if total_s >= 1.0 {
-        eprintln!(
-            "Found {} result(s) in {:.2}s",
-            result_count, total_s
-        );
+        eprintln!("Found {} result(s) in {:.2}s", result_count, total_s);
     } else {
-        eprintln!(
-            "Found {} result(s) in {:.3}ms",
-            result_count, total_ms
-        );
+        eprintln!("Found {} result(s) in {:.3}ms", result_count, total_ms);
     }
 
     Ok(())
@@ -312,9 +345,8 @@ fn run_watch(
     max_batch_files: usize,
     verbose: bool,
 ) -> io::Result<()> {
-    let root = std::fs::canonicalize(&path).map_err(|e| {
-        io::Error::other(format!("canonicalize {}: {e}", path.display()))
-    })?;
+    let root = std::fs::canonicalize(&path)
+        .map_err(|e| io::Error::other(format!("canonicalize {}: {e}", path.display())))?;
     let hash = pwd_hash(&root);
     let home = home_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve home directory")
@@ -333,5 +365,37 @@ fn run_watch(
         compact_interval_secs,
         max_batch_files,
         verbose,
+        log_to_stderr: true,
+        status_tx: None,
+    })
+}
+
+fn run_live(
+    path: PathBuf,
+    debounce_ms: u64,
+    compact_interval_secs: u64,
+    max_batch_files: usize,
+    max_results: usize,
+) -> io::Result<()> {
+    let root = std::fs::canonicalize(&path)
+        .map_err(|e| io::Error::other(format!("canonicalize {}: {e}", path.display())))?;
+    let hash = pwd_hash(&root);
+    let home = home_dir().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "could not resolve home directory")
+    })?;
+    let bundle_dir = index_bundle_path(&home, &hash);
+
+    if !watch::has_base_bundle(&bundle_dir) {
+        eprintln!("no baseline bundle found; building initial index first...");
+        run_index(path, 100_000, 20_000_000, None)?;
+    }
+
+    live::run(live::LiveConfig {
+        root,
+        bundle_dir,
+        debounce_ms,
+        compact_interval_secs,
+        max_batch_files,
+        max_results,
     })
 }

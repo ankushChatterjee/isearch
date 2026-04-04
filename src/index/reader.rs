@@ -107,7 +107,7 @@ impl Index {
                         LookupValue::PostingsOffset(offset) => self.postings.read(offset),
                     };
                     result = Some(match result {
-                        None    => docs,
+                        None => docs,
                         Some(c) => intersect_sorted(&c, &docs),
                     });
                 }
@@ -119,7 +119,7 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocId, intersect_sorted};
+    use super::{intersect_sorted, DocId};
 
     #[test]
     fn intersect_sorted_handles_common_shapes() {

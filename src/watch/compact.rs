@@ -39,7 +39,12 @@ pub fn compact(
     ));
     fs::create_dir_all(&tmp_bundle)?;
     write_bundle(&tmp_bundle, &index, &store, root)?;
-    for name in [LOOKUP_FILENAME, POSTINGS_FILENAME, PATHS_FILENAME, META_FILENAME] {
+    for name in [
+        LOOKUP_FILENAME,
+        POSTINGS_FILENAME,
+        PATHS_FILENAME,
+        META_FILENAME,
+    ] {
         fs::rename(tmp_bundle.join(name), bundle_dir.join(name))?;
     }
     let _ = fs::remove_dir_all(&tmp_bundle);

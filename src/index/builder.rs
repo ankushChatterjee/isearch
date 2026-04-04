@@ -12,7 +12,9 @@ use rayon::prelude::*;
 
 use crate::ngram;
 
-use super::format::{encode_inline_doc_id, encode_postings_offset, push_u32_varint, LOOKUP_VALUE_MASK};
+use super::format::{
+    encode_inline_doc_id, encode_postings_offset, push_u32_varint, LOOKUP_VALUE_MASK,
+};
 use super::spill;
 use super::types::{DocId, DocStore, Index, LookupTable, Posting, PostingsBlob};
 
@@ -65,9 +67,8 @@ impl PostingsBlob {
             ));
         }
 
-        let count = u32::try_from(posting.doc_ids.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "posting list too long")
-        })?;
+        let count = u32::try_from(posting.doc_ids.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "posting list too long"))?;
         push_u32_varint(&mut self.data, count);
 
         let mut prev = 0u32;
@@ -93,7 +94,7 @@ impl PostingsBlob {
 
     /// Build blob + lookup table from postings sorted by hash.
     pub(crate) fn from_postings(postings: &[Posting]) -> io::Result<(Self, LookupTable, u64)> {
-        let mut blob   = Self::new();
+        let mut blob = Self::new();
         let mut lookup = LookupTable::new();
         let mut inline_singletons = 0u64;
         for posting in postings {
@@ -121,7 +122,9 @@ impl PostingsBlob {
 
 impl LookupTable {
     pub(crate) fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub(crate) fn push(&mut self, hash: u32, value: u32) {
@@ -318,7 +321,11 @@ impl Index {
         let _ = io::stderr().flush();
         let t = Instant::now();
         pairs.par_sort_unstable_by_key(|&(h, DocId(d))| (h, d));
-        eprintln!("\r  [2/5] sorted {} pairs  ({:.2}s)", pairs.len(), t.elapsed().as_secs_f64());
+        eprintln!(
+            "\r  [2/5] sorted {} pairs  ({:.2}s)",
+            pairs.len(),
+            t.elapsed().as_secs_f64()
+        );
 
         eprint!("  [3/5] dedup {} pairs...", pairs.len());
         let _ = io::stderr().flush();

@@ -66,9 +66,10 @@ impl MmapBundle {
         let paths_path = dir.join(PATHS_FILENAME);
 
         let t = Instant::now();
-        let lookup_file = OpenOptions::new().read(true).open(&lookup_path).map_err(|e| {
-            io::Error::other(format!("open {}: {e}", lookup_path.display()))
-        })?;
+        let lookup_file = OpenOptions::new()
+            .read(true)
+            .open(&lookup_path)
+            .map_err(|e| io::Error::other(format!("open {}: {e}", lookup_path.display())))?;
         // SAFETY: `lookup_file` is read-only and kept open in `_lookup_file` for the lifetime of
         // this struct; we do not mutate the file while the mapping exists.
         let lookup = unsafe {
@@ -89,7 +90,9 @@ impl MmapBundle {
         let expected_rows = lookup_hdr.entry_count as usize;
         let expected_bytes = expected_rows
             .checked_mul(LookupEntryRecord::SIZE)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "lookup row count overflow"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "lookup row count overflow")
+            })?;
         if body_len != expected_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -101,9 +104,10 @@ impl MmapBundle {
         }
 
         let t = Instant::now();
-        let mut postings = OpenOptions::new().read(true).open(&postings_path).map_err(|e| {
-            io::Error::other(format!("open {}: {e}", postings_path.display()))
-        })?;
+        let mut postings = OpenOptions::new()
+            .read(true)
+            .open(&postings_path)
+            .map_err(|e| io::Error::other(format!("open {}: {e}", postings_path.display())))?;
         let file_len = postings.metadata()?.len();
         let mut hdr_buf = [0u8; HEADER_LEN];
         if file_len < HEADER_LEN as u64 {
@@ -181,7 +185,10 @@ impl MmapBundle {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "posting offset overflow"))?;
         let (count_u32, mut cur) = read_u32_varint_at(&self.postings, abs)?;
         let count = usize::try_from(count_u32).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "posting count does not fit usize")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "posting count does not fit usize",
+            )
         })?;
 
         let mut docs = Vec::with_capacity(count);
@@ -205,10 +212,13 @@ impl MmapBundle {
         let mut result: Option<Vec<DocId>> = None;
         for &hash in hashes {
             let Some(value) = self.lookup_hash(hash) else {
-                return Ok((Vec::new(), PostingsReadTimings {
-                    ms: postings_read_ms,
-                    postings_lists_read,
-                }));
+                return Ok((
+                    Vec::new(),
+                    PostingsReadTimings {
+                        ms: postings_read_ms,
+                        postings_lists_read,
+                    },
+                ));
             };
             let t = Instant::now();
             let docs = match value {

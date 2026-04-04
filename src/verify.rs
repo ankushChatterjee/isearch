@@ -110,14 +110,16 @@ pub fn verify_doc_paths_parallel(
 ) -> Vec<VerifyFileResult> {
     let mut verify_results: Vec<VerifyFileResult> = candidates
         .par_iter()
-        .filter_map(|(doc_id, rel_path)| match verify_candidate(rel_path, pattern, *doc_id) {
-            Ok(Some(v)) => Some(v),
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("{}: read error: {e}", rel_path);
-                None
-            }
-        })
+        .filter_map(
+            |(doc_id, rel_path)| match verify_candidate(rel_path, pattern, *doc_id) {
+                Ok(Some(v)) => Some(v),
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("{}: read error: {e}", rel_path);
+                    None
+                }
+            },
+        )
         .collect();
     verify_results.sort_unstable_by_key(|v| v.doc_id);
     verify_results

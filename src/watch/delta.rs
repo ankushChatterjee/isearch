@@ -77,7 +77,10 @@ pub fn replay(path: &Path, start_offset: u64) -> io::Result<(Vec<DeltaOp>, u64)>
         return Ok((Vec::new(), DELTA_HEADER_LEN));
     }
     if bytes[0..8] != DELTA_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid delta magic"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid delta magic",
+        ));
     }
 
     let mut cur = start_offset.max(DELTA_HEADER_LEN) as usize;
@@ -138,9 +141,8 @@ fn encode_ops(ops: &[DeltaOp]) -> io::Result<Vec<u8>> {
                 push_u32_varint(&mut out, *doc_id);
                 push_u32_varint(
                     &mut out,
-                    u32::try_from(path.len()).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "path too long")
-                    })?,
+                    u32::try_from(path.len())
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "path too long"))?,
                 );
                 out.extend_from_slice(path.as_bytes());
             }
@@ -215,7 +217,10 @@ mod tests {
         let file = temp_file("isearch-delta");
         let mut w = DeltaWriter::open(&file).unwrap();
         let ops = vec![
-            DeltaOp::AddHash { doc_id: 1, hash: 10 },
+            DeltaOp::AddHash {
+                doc_id: 1,
+                hash: 10,
+            },
             DeltaOp::UpsertPath {
                 doc_id: 1,
                 path: "/tmp/a".to_string(),
