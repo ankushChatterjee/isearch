@@ -130,6 +130,18 @@ impl LookupTable {
 }
 
 impl Index {
+    /// Build an index from already-extracted per-document hash sets.
+    pub fn build_from_doc_hashes(docs: &[(String, Vec<u32>)]) -> io::Result<(DocStore, Self)> {
+        let mut store = DocStore::new();
+        let mut pairs: Vec<(u32, DocId)> = Vec::new();
+        for (path, hashes) in docs {
+            let doc_id = store.add_path(path);
+            pairs.extend(hashes.iter().copied().map(|h| (h, doc_id)));
+        }
+        let index = Self::build_from_pairs(pairs)?;
+        Ok((store, index))
+    }
+
     /// Read paths in parallel, extract n-gram hashes per file, then assign
     /// [`DocId`]s in path order and finish the index pipeline.
     #[allow(dead_code)] // legacy entrypoint retained for callers/tests
