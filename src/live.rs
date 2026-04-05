@@ -380,8 +380,8 @@ fn render_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         Span::raw(" "),
         Span::styled(
             format!(
-                "{} hits / {} candidates / {:.2}ms ({})",
-                app.result_count, app.candidate_count, app.elapsed_ms, app.backend
+                "{} hits / {} candidates ({})",
+                app.result_count, app.candidate_count, app.backend
             ),
             Style::default().fg(Color::Cyan),
         ),
