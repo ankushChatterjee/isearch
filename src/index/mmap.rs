@@ -18,7 +18,7 @@ use super::format::{
     decode_file_header, decode_lookup_value, read_paths_lines, LookupEntryRecord, LookupValue,
     LOOKUP_FILENAME, LOOKUP_MAGIC, PATHS_FILENAME, POSTINGS_FILENAME, POSTINGS_MAGIC,
 };
-use super::reader::intersect_sorted;
+use super::reader::{intersect_sorted, union_sorted};
 use super::types::DocId;
 
 const HEADER_LEN: usize = 32;
@@ -233,6 +233,33 @@ impl MmapBundle {
             result = Some(match result {
                 None => docs,
                 Some(c) => intersect_sorted(&c, &docs),
+            });
+        }
+        Ok((
+            result.unwrap_or_default(),
+            PostingsReadTimings {
+                ms: postings_read_ms,
+                postings_lists_read,
+            },
+        ))
+    }
+
+    /// Union of [`Self::candidates`] for each alternative: each inner `Vec<u32>` is one AND of
+    /// n-gram hashes (one extracted literal); alternatives are OR-merged (sorted union).
+    pub fn candidates_union(
+        &self,
+        alternatives: &[Vec<u32>],
+    ) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
+        let mut postings_read_ms = 0.0f64;
+        let mut postings_lists_read = 0u32;
+        let mut result: Option<Vec<DocId>> = None;
+        for hashes in alternatives {
+            let (docs, t) = self.candidates(hashes)?;
+            postings_read_ms += t.ms;
+            postings_lists_read += t.postings_lists_read;
+            result = Some(match result {
+                None => docs,
+                Some(prev) => union_sorted(&prev, &docs),
             });
         }
         Ok((

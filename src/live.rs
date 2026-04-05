@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::index::{DocId, MmapBundle, PostingsReadTimings};
-use crate::ngram;
+use crate::regex_plan::{self, PrefilterPlan};
 use crate::verify;
 use crate::watch::{self, WatchPhase, WatchStatus};
 
@@ -293,7 +293,7 @@ fn render_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     let input_text = if app.query.is_empty() {
         Line::from(vec![Span::styled(
-            "type to search (results start at 3 chars)",
+            "search",
             Style::default().fg(Color::DarkGray),
         )])
     } else {
@@ -333,9 +333,9 @@ fn render_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         .collect();
 
     let main_panel = if visible.is_empty() {
-        if app.query.len() < 3 {
+        if app.query.is_empty() {
             Paragraph::new(Line::from(Span::styled(
-                "waiting for 3+ chars...",
+                "waiting for input...",
                 Style::default().fg(Color::DarkGray),
             )))
         } else {
@@ -434,7 +434,7 @@ impl SearchEngine {
 
     fn search(&mut self, id: u64, query: &str) -> SearchResult {
         let t0 = Instant::now();
-        if query.len() < 3 {
+        if query.is_empty() {
             return SearchResult {
                 id,
                 rendered_rows: Vec::new(),
@@ -472,18 +472,24 @@ impl SearchEngine {
         &mut self,
         query: &str,
     ) -> io::Result<(Vec<ResultRow>, usize, usize, &'static str)> {
-        let query_bytes = query.as_bytes();
-        let covering = ngram::covering_ngrams(query_bytes);
-        let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
+        let plan = regex_plan::build_regex_plan(query).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid regex: {e}"),
+            )
+        })?;
 
         let (verify_results, candidate_count, backend) =
             if let Some(docs) = watch::load_query_docs(&self.bundle_dir)? {
                 let mut path_map = HashMap::with_capacity(docs.len());
-                let mut candidates = Vec::new();
-                for (doc_id, path, doc_hashes) in docs {
-                    if hashes.iter().all(|h| doc_hashes.binary_search(h).is_ok()) {
-                        candidates.push(DocId(doc_id));
+                let candidates: Vec<DocId> = match &plan.prefilter {
+                    PrefilterPlan::NeverMatches => Vec::new(),
+                    PrefilterPlan::AllDocs => docs.iter().map(|(id, _, _)| DocId(*id)).collect(),
+                    PrefilterPlan::Union(_) => {
+                        regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter)
                     }
+                };
+                for (doc_id, path, _) in docs {
                     path_map.insert(doc_id, path);
                 }
                 let candidate_count = candidates.len();
@@ -492,28 +498,31 @@ impl SearchEngine {
                     .take(MAX_VERIFY_DOCS_PER_QUERY)
                     .filter_map(|doc| path_map.get(&doc.0).map(|p| (doc, p.clone())))
                     .collect();
-                (
-                    verify::verify_doc_paths_parallel(&candidate_pairs, query_bytes),
-                    candidate_count,
-                    "watch-state",
-                )
+                let verify_results = if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
+                    Vec::new()
+                } else {
+                    verify::verify_doc_paths_parallel_regex(&candidate_pairs, &plan.regex)
+                };
+                (verify_results, candidate_count, "watch-state")
             } else {
                 self.ensure_mmap_loaded()?;
                 let bundle = self
                     .mmap_bundle
                     .as_ref()
                     .ok_or_else(|| io::Error::other("mmap bundle unavailable"))?;
-                let (candidates, PostingsReadTimings { .. }) = bundle.candidates(&hashes)?;
+                let (candidates, PostingsReadTimings { .. }) =
+                    regex_plan::mmap_candidates(bundle, self.mmap_paths.len(), &plan.prefilter)?;
                 let candidate_count = candidates.len();
                 let limited: Vec<DocId> = candidates
                     .into_iter()
                     .take(MAX_VERIFY_DOCS_PER_QUERY)
                     .collect();
-                (
-                    verify::verify_candidates_parallel(&limited, &self.mmap_paths, query_bytes),
-                    candidate_count,
-                    "mmap",
-                )
+                let verify_results = if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
+                    Vec::new()
+                } else {
+                    verify::verify_candidates_parallel_regex(&limited, &self.mmap_paths, &plan.regex)
+                };
+                (verify_results, candidate_count, "mmap")
             };
 
         let mut rows = Vec::with_capacity(self.max_results);

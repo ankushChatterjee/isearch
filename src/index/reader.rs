@@ -3,6 +3,33 @@
 use super::format::{decode_lookup_value, read_u32_varint_from_slice, LookupValue};
 use super::types::{DocId, Index, LookupEntry, LookupTable, PostingsBlob};
 
+/// Sorted union of two sorted doc-id lists (deduplicated).
+pub(crate) fn union_sorted(a: &[DocId], b: &[DocId]) -> Vec<DocId> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
 pub(crate) fn intersect_sorted(a: &[DocId], b: &[DocId]) -> Vec<DocId> {
     let mut out = Vec::with_capacity(a.len().min(b.len()));
     let mut i = 0usize;
@@ -119,7 +146,20 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
-    use super::{intersect_sorted, DocId};
+    use super::{intersect_sorted, union_sorted, DocId};
+
+    #[test]
+    fn union_sorted_merges_sorted_lists() {
+        assert_eq!(union_sorted(&[], &[]), Vec::<DocId>::new());
+        assert_eq!(
+            union_sorted(&[DocId(1), DocId(3)], &[DocId(2), DocId(4)]),
+            vec![DocId(1), DocId(2), DocId(3), DocId(4)]
+        );
+        assert_eq!(
+            union_sorted(&[DocId(1), DocId(2)], &[DocId(2), DocId(3)]),
+            vec![DocId(1), DocId(2), DocId(3)]
+        );
+    }
 
     #[test]
     fn intersect_sorted_handles_common_shapes() {

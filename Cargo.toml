@@ -2,7 +2,7 @@
 name = "isearch"
 version = "0.1.0"
 edition = "2021"
-description = "Ripgrep-compatible CLI scaffold with naive full-text search (index planned)"
+description = "Sparse n-gram index with regex query (HIR literal prefilter + mmap postings)"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

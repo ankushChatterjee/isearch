@@ -1,9 +1,10 @@
 //! `isearch index` — build an on-disk inverted index under `~/.isearch/indexes/`.
-//! `isearch query` — load that index, intersect sparse n-gram postings, verify literally.
+//! `isearch query` — load that index, intersect sparse n-gram postings, verify with regex.
 
 mod index;
 mod live;
 mod ngram;
+mod regex_plan;
 mod verify;
 mod watch;
 
@@ -19,6 +20,7 @@ use index::{
     index_bundle_path, pwd_hash, write_bundle, write_paths_and_meta, BuildOutput, DocId, Index,
     MmapBundle, PostingsReadTimings, SpillOptions,
 };
+use regex_plan::PrefilterPlan;
 /// `./relative/path` under `root`, or the path as given with `/` separators.
 fn query_result_path_display(file_path: &str, root: &Path) -> String {
     let p = Path::new(file_path);
@@ -36,7 +38,7 @@ fn query_result_path_display(file_path: &str, root: &Path) -> String {
 
 #[derive(Parser, Debug)]
 #[command(name = "isearch")]
-#[command(about = "Sparse n-gram index (`index` / `query`).")]
+#[command(about = "Sparse n-gram index with regex search (`index` / `query` / `live`).")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -60,9 +62,9 @@ enum Commands {
         #[arg(long)]
         spill_temp_dir: Option<PathBuf>,
     },
-    /// Search for literal TEXT in the indexed corpus (uses sparse n-gram intersection, then verifies).
+    /// Search the indexed corpus with a Rust regex (sparse n-gram intersection when literals are extracted, then verifies).
     Query {
-        /// Literal string to find (not a regular expression).
+        /// Regular expression (Rust `regex` syntax).
         text: String,
         /// Indexed project root (must match the tree passed to `index`).
         #[arg(short, long, default_value = ".")]
@@ -210,6 +212,13 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         ));
     }
 
+    let plan = regex_plan::build_regex_plan(&pattern).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid regex: {e}"),
+        )
+    })?;
+
     let t_query_total = Instant::now();
 
     let root = std::fs::canonicalize(&path)
@@ -240,23 +249,13 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         open_reads.paths_file_read_ms,
     );
 
-    let query_bytes = pattern.as_bytes();
-
     let mut effective_doc_paths: Option<HashMap<u32, String>> = None;
     let t_query = Instant::now();
-    // Sparse n-gram extraction needs length ≥ 2; shorter queries fall back to scanning all docs.
     let (candidates, postings_reads) = if let Some(docs) = watch::load_query_docs(&bundle_dir)? {
-        let candidate_doc_ids = if query_bytes.len() < 2 {
-            docs.iter().map(|(doc_id, _, _)| DocId(*doc_id)).collect()
-        } else {
-            let covering = ngram::covering_ngrams(query_bytes);
-            let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
-            docs.iter()
-                .filter(|(_, _, doc_hashes)| {
-                    hashes.iter().all(|h| doc_hashes.binary_search(h).is_ok())
-                })
-                .map(|(doc_id, _, _)| DocId(*doc_id))
-                .collect()
+        let candidate_doc_ids = match &plan.prefilter {
+            PrefilterPlan::NeverMatches => Vec::new(),
+            PrefilterPlan::AllDocs => docs.iter().map(|(doc_id, _, _)| DocId(*doc_id)).collect(),
+            PrefilterPlan::Union(_) => regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter),
         };
         let mut map = HashMap::with_capacity(docs.len());
         for (doc_id, path, _) in docs {
@@ -264,17 +263,8 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         }
         effective_doc_paths = Some(map);
         (candidate_doc_ids, PostingsReadTimings::default())
-    } else if query_bytes.len() < 2 {
-        (
-            (0..paths.len())
-                .map(|i| DocId(i as u32))
-                .collect::<Vec<_>>(),
-            PostingsReadTimings::default(),
-        )
     } else {
-        let covering = ngram::covering_ngrams(query_bytes);
-        let hashes: Vec<u32> = covering.iter().map(|ng| ngram::hash_ngram(ng)).collect();
-        bundle.candidates(&hashes)?
+        regex_plan::mmap_candidates(&bundle, paths.len(), &plan.prefilter)?
     };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
     if effective_doc_paths.is_some() {
@@ -297,14 +287,16 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
     let mut out = stdout.lock();
 
     let t_verify = Instant::now();
-    let verify_results = if let Some(path_map) = &effective_doc_paths {
+    let verify_results = if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
+        Vec::new()
+    } else if let Some(path_map) = &effective_doc_paths {
         let candidate_pairs: Vec<(DocId, String)> = candidates
             .iter()
             .filter_map(|doc| path_map.get(&doc.0).map(|p| (*doc, p.clone())))
             .collect();
-        verify::verify_doc_paths_parallel(&candidate_pairs, query_bytes)
+        verify::verify_doc_paths_parallel_regex(&candidate_pairs, &plan.regex)
     } else {
-        verify::verify_candidates_parallel(&candidates, &paths, query_bytes)
+        verify::verify_candidates_parallel_regex(&candidates, &paths, &plan.regex)
     };
 
     let verify_read_ms: f64 = verify_results.iter().map(|v| v.read_ms).sum();

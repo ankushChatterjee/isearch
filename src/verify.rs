@@ -1,10 +1,11 @@
-//! Literal substring verification after n-gram candidate filtering.
+//! Substring / regex verification after n-gram candidate filtering.
 
 use std::fs;
 use std::io;
 
 use memchr::{memchr, memchr_iter, memmem, memrchr};
 use rayon::prelude::*;
+use regex::Regex;
 
 use crate::index::DocId;
 
@@ -23,6 +24,7 @@ pub struct VerifyFileResult {
 }
 
 /// Read one file and confirm literal `pattern` occurrences; map each match to its line text.
+#[allow(dead_code)] // Kept for literal / `-F`-style search if reintroduced.
 pub fn verify_candidate(
     path: &str,
     pattern: &[u8],
@@ -78,7 +80,62 @@ pub fn verify_candidate(
     }))
 }
 
+/// Read one file and confirm regex matches; map each match start to its line text (one line per distinct line start).
+pub fn verify_candidate_regex(
+    path: &str,
+    re: &Regex,
+    doc_id: DocId,
+) -> io::Result<Option<VerifyFileResult>> {
+    let t_read = std::time::Instant::now();
+    let bytes = fs::read(path)?;
+    let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
+
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let matches: Vec<usize> = re.find_iter(s).map(|m| m.start()).collect();
+    if matches.is_empty() {
+        return Ok(None);
+    }
+
+    let mut hits = Vec::new();
+    let mut last_line_start = None::<usize>;
+    for &off in &matches {
+        let line_start = memrchr(b'\n', &bytes[..off]).map_or(0usize, |i| i + 1);
+        if last_line_start == Some(line_start) {
+            continue;
+        }
+        last_line_start = Some(line_start);
+
+        let rel_end = memchr(b'\n', &bytes[off..]).unwrap_or(bytes.len() - off);
+        let line_end = off + rel_end;
+        let line_no = memchr_iter(b'\n', &bytes[..line_start]).count() + 1;
+
+        let line_bytes = if line_end > line_start && bytes[line_end - 1] == b'\r' {
+            &bytes[line_start..line_end - 1]
+        } else {
+            &bytes[line_start..line_end]
+        };
+        let line = std::str::from_utf8(line_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_owned();
+        hits.push(VerifyLine { line_no, line });
+    }
+
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(VerifyFileResult {
+        doc_id,
+        rel_path: path.to_owned(),
+        read_ms,
+        hits,
+    }))
+}
+
 /// Parallel verification over candidate doc ids (paths resolved from `paths`).
+#[allow(dead_code)]
 pub fn verify_candidates_parallel(
     candidates: &[DocId],
     paths: &[String],
@@ -104,6 +161,7 @@ pub fn verify_candidates_parallel(
 }
 
 /// Parallel verification over explicit `(DocId, path)` pairs.
+#[allow(dead_code)]
 pub fn verify_doc_paths_parallel(
     candidates: &[(DocId, String)],
     pattern: &[u8],
@@ -112,6 +170,53 @@ pub fn verify_doc_paths_parallel(
         .par_iter()
         .filter_map(
             |(doc_id, rel_path)| match verify_candidate(rel_path, pattern, *doc_id) {
+                Ok(Some(v)) => Some(v),
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("{}: read error: {e}", rel_path);
+                    None
+                }
+            },
+        )
+        .collect();
+    verify_results.sort_unstable_by_key(|v| v.doc_id);
+    verify_results
+}
+
+/// Parallel regex verification over candidate doc ids (paths resolved from `paths`).
+pub fn verify_candidates_parallel_regex(
+    candidates: &[DocId],
+    paths: &[String],
+    re: &Regex,
+) -> Vec<VerifyFileResult> {
+    let mut verify_results: Vec<VerifyFileResult> = candidates
+        .par_iter()
+        .filter_map(|&doc_id| {
+            let rel_path = paths.get(doc_id.0 as usize)?;
+            match verify_candidate_regex(rel_path, re, doc_id) {
+                Ok(Some(v)) => Some(v),
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("{}: read error: {e}", rel_path);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    verify_results.sort_unstable_by_key(|v| v.doc_id);
+    verify_results
+}
+
+/// Parallel regex verification over explicit `(DocId, path)` pairs.
+pub fn verify_doc_paths_parallel_regex(
+    candidates: &[(DocId, String)],
+    re: &Regex,
+) -> Vec<VerifyFileResult> {
+    let mut verify_results: Vec<VerifyFileResult> = candidates
+        .par_iter()
+        .filter_map(
+            |(doc_id, rel_path)| match verify_candidate_regex(rel_path, re, *doc_id) {
                 Ok(Some(v)) => Some(v),
                 Ok(None) => None,
                 Err(e) => {
