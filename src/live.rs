@@ -281,7 +281,7 @@ fn render_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     let input_block = Block::default()
         .title(Line::from(vec![Span::styled(
-            " ISEARCH LIVE ",
+            " isearch ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Green)
