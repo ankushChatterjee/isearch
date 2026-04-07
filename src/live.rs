@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -18,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::index::{DocId, MmapBundle, PostingsReadTimings};
+use crate::index::{DocId, PostingsReadTimings, ShardedBundle};
 use crate::regex_plan::{self, PrefilterPlan};
 use crate::verify;
 use crate::watch::{self, WatchPhase, WatchStatus};
@@ -417,18 +419,21 @@ struct SearchEngine {
     root: PathBuf,
     bundle_dir: PathBuf,
     max_results: usize,
-    mmap_bundle: Option<MmapBundle>,
-    mmap_paths: Vec<String>,
+    sharded_bundle: Option<ShardedBundle>,
+    bundle_paths: Vec<String>,
+    error_log_path: PathBuf,
 }
 
 impl SearchEngine {
     fn new(root: PathBuf, bundle_dir: PathBuf, max_results: usize) -> Self {
+        let error_log_path = bundle_dir.join("live_errors.log");
         Self {
             root,
             bundle_dir,
             max_results,
-            mmap_bundle: None,
-            mmap_paths: Vec::new(),
+            sharded_bundle: None,
+            bundle_paths: Vec::new(),
+            error_log_path,
         }
     }
 
@@ -473,57 +478,66 @@ impl SearchEngine {
         query: &str,
     ) -> io::Result<(Vec<ResultRow>, usize, usize, &'static str)> {
         let plan = regex_plan::build_regex_plan(query).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid regex: {e}"),
-            )
+            io::Error::new(io::ErrorKind::InvalidInput, format!("invalid regex: {e}"))
         })?;
 
-        let (verify_results, candidate_count, backend) =
-            if let Some(docs) = watch::load_query_docs(&self.bundle_dir)? {
-                let mut path_map = HashMap::with_capacity(docs.len());
-                let candidates: Vec<DocId> = match &plan.prefilter {
-                    PrefilterPlan::NeverMatches => Vec::new(),
-                    PrefilterPlan::AllDocs => docs.iter().map(|(id, _, _)| DocId(*id)).collect(),
-                    PrefilterPlan::Union(_) => {
-                        regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter)
-                    }
-                };
-                for (doc_id, path, _) in docs {
-                    path_map.insert(doc_id, path);
+        let (verify_results, candidate_count, backend) = if let Some(docs) =
+            watch::load_query_docs(&self.bundle_dir)?
+        {
+            let mut path_map = HashMap::with_capacity(docs.len());
+            let candidates: Vec<DocId> = match &plan.prefilter {
+                PrefilterPlan::NeverMatches => Vec::new(),
+                PrefilterPlan::AllDocs => docs.iter().map(|(id, _, _)| DocId(*id)).collect(),
+                PrefilterPlan::Union(_) => {
+                    regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter)
                 }
-                let candidate_count = candidates.len();
-                let candidate_pairs: Vec<(DocId, String)> = candidates
-                    .into_iter()
-                    .take(MAX_VERIFY_DOCS_PER_QUERY)
-                    .filter_map(|doc| path_map.get(&doc.0).map(|p| (doc, p.clone())))
-                    .collect();
-                let verify_results = if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
-                    Vec::new()
-                } else {
-                    verify::verify_doc_paths_parallel_regex(&candidate_pairs, &plan.regex)
-                };
-                (verify_results, candidate_count, "watch-state")
-            } else {
-                self.ensure_mmap_loaded()?;
-                let bundle = self
-                    .mmap_bundle
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("mmap bundle unavailable"))?;
-                let (candidates, PostingsReadTimings { .. }) =
-                    regex_plan::mmap_candidates(bundle, self.mmap_paths.len(), &plan.prefilter)?;
-                let candidate_count = candidates.len();
-                let limited: Vec<DocId> = candidates
-                    .into_iter()
-                    .take(MAX_VERIFY_DOCS_PER_QUERY)
-                    .collect();
-                let verify_results = if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
-                    Vec::new()
-                } else {
-                    verify::verify_candidates_parallel_regex(&limited, &self.mmap_paths, &plan.regex)
-                };
-                (verify_results, candidate_count, "mmap")
             };
+            for (doc_id, path, _) in docs {
+                path_map.insert(doc_id, path);
+            }
+            let candidate_count = candidates.len();
+            let candidate_pairs: Vec<(DocId, String)> = candidates
+                .into_iter()
+                .take(MAX_VERIFY_DOCS_PER_QUERY)
+                .filter_map(|doc| path_map.get(&doc.0).map(|p| (doc, p.clone())))
+                .collect();
+            let (verify_results, verify_errors) =
+                if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
+                    (Vec::new(), Vec::new())
+                } else {
+                    verify::verify_doc_paths_parallel_regex_collect_errors(
+                        &candidate_pairs,
+                        &plan.regex,
+                    )
+                };
+            self.append_verify_errors(&verify_errors);
+            (verify_results, candidate_count, "watch-state")
+        } else {
+            self.ensure_sharded_loaded()?;
+            let bundle = self
+                .sharded_bundle
+                .as_ref()
+                .ok_or_else(|| io::Error::other("sharded bundle unavailable"))?;
+            let (candidates, PostingsReadTimings { .. }) =
+                regex_plan::sharded_candidates(bundle, self.bundle_paths.len(), &plan.prefilter)?;
+            let candidate_count = candidates.len();
+            let limited: Vec<DocId> = candidates
+                .into_iter()
+                .take(MAX_VERIFY_DOCS_PER_QUERY)
+                .collect();
+            let (verify_results, verify_errors) =
+                if matches!(plan.prefilter, PrefilterPlan::NeverMatches) {
+                    (Vec::new(), Vec::new())
+                } else {
+                    verify::verify_candidates_parallel_regex_collect_errors(
+                        &limited,
+                        &self.bundle_paths,
+                        &plan.regex,
+                    )
+                };
+            self.append_verify_errors(&verify_errors);
+            (verify_results, candidate_count, "mmap")
+        };
 
         let mut rows = Vec::with_capacity(self.max_results);
         let mut total_hits = 0usize;
@@ -555,14 +569,30 @@ impl SearchEngine {
         Ok((rows, total_hits, candidate_count, backend))
     }
 
-    fn ensure_mmap_loaded(&mut self) -> io::Result<()> {
-        if self.mmap_bundle.is_some() {
+    fn ensure_sharded_loaded(&mut self) -> io::Result<()> {
+        if self.sharded_bundle.is_some() {
             return Ok(());
         }
-        let (bundle, paths, _) = MmapBundle::open(&self.bundle_dir)?;
-        self.mmap_bundle = Some(bundle);
-        self.mmap_paths = paths;
+        let (bundle, paths) = ShardedBundle::open(&self.bundle_dir)?;
+        self.sharded_bundle = Some(bundle);
+        self.bundle_paths = paths;
         Ok(())
+    }
+
+    fn append_verify_errors(&self, errors: &[String]) {
+        if errors.is_empty() {
+            return;
+        }
+        let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.error_log_path)
+        else {
+            return;
+        };
+        for e in errors {
+            let _ = writeln!(f, "{e}");
+        }
     }
 }
 

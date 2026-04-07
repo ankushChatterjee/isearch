@@ -14,9 +14,8 @@ use std::time::{Duration, Instant};
 
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 
-use crate::index::format::{
-    read_paths_lines, LOOKUP_FILENAME, META_FILENAME, PATHS_FILENAME, POSTINGS_FILENAME,
-};
+use crate::index::format::{read_paths_lines, MANIFEST_FILENAME, META_FILENAME, PATHS_FILENAME};
+use crate::index::sharded::ShardedBundle;
 
 use self::apply::{apply_actions, fingerprint};
 use self::delta::{DeltaOp, DeltaWriter, DELTA_FILENAME};
@@ -247,10 +246,10 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 pub fn has_base_bundle(bundle_dir: &Path) -> bool {
-    bundle_dir.join(LOOKUP_FILENAME).is_file()
-        && bundle_dir.join(POSTINGS_FILENAME).is_file()
+    bundle_dir.join(MANIFEST_FILENAME).is_file()
         && bundle_dir.join(PATHS_FILENAME).is_file()
         && bundle_dir.join(META_FILENAME).is_file()
+        && ShardedBundle::has_valid_layout(bundle_dir)
 }
 
 pub fn load_query_docs(bundle_dir: &Path) -> io::Result<Option<Vec<(u32, String, Vec<u32>)>>> {

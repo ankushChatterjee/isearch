@@ -57,18 +57,10 @@ pub struct MmapBundle {
 }
 
 impl MmapBundle {
-    /// Open bundle: mmap `lookup.isearch`, open `postings.isearch` for reads at offset, load `paths.txt`.
-    pub fn open(dir: &Path) -> io::Result<(Self, Vec<String>, BundleOpenTimings)> {
-        let mut timings = BundleOpenTimings::default();
-
-        let lookup_path = dir.join(LOOKUP_FILENAME);
-        let postings_path = dir.join(POSTINGS_FILENAME);
-        let paths_path = dir.join(PATHS_FILENAME);
-
-        let t = Instant::now();
+    pub fn open_lookup_postings(lookup_path: &Path, postings_path: &Path) -> io::Result<Self> {
         let lookup_file = OpenOptions::new()
             .read(true)
-            .open(&lookup_path)
+            .open(lookup_path)
             .map_err(|e| io::Error::other(format!("open {}: {e}", lookup_path.display())))?;
         // SAFETY: `lookup_file` is read-only and kept open in `_lookup_file` for the lifetime of
         // this struct; we do not mutate the file while the mapping exists.
@@ -77,7 +69,6 @@ impl MmapBundle {
                 .map(&lookup_file)
                 .map_err(|e| io::Error::other(format!("mmap {}: {e}", lookup_path.display())))?
         };
-        timings.lookup_open_and_mmap_ms = ms(t);
 
         let lookup_hdr = decode_file_header(&lookup, LOOKUP_MAGIC)?;
         let body_len = lookup.len().saturating_sub(HEADER_LEN);
@@ -103,10 +94,9 @@ impl MmapBundle {
             ));
         }
 
-        let t = Instant::now();
         let mut postings = OpenOptions::new()
             .read(true)
-            .open(&postings_path)
+            .open(postings_path)
             .map_err(|e| io::Error::other(format!("open {}: {e}", postings_path.display())))?;
         let file_len = postings.metadata()?.len();
         let mut hdr_buf = [0u8; HEADER_LEN];
@@ -117,7 +107,6 @@ impl MmapBundle {
             ));
         }
         postings.read_exact(&mut hdr_buf)?;
-        timings.postings_open_and_header_ms = ms(t);
         let postings_hdr = decode_file_header(&hdr_buf, POSTINGS_MAGIC)?;
         if postings_hdr.entry_count != 0 {
             return Err(io::Error::new(
@@ -136,21 +125,43 @@ impl MmapBundle {
             ));
         }
 
+        Ok(Self {
+            _lookup_file: lookup_file,
+            lookup,
+            postings,
+            postings_payload_base: HEADER_LEN as u64,
+        })
+    }
+
+    /// Open bundle: mmap `lookup.isearch`, open `postings.isearch` for reads at offset, load `paths.txt`.
+    pub fn open(dir: &Path) -> io::Result<(Self, Vec<String>, BundleOpenTimings)> {
+        let mut timings = BundleOpenTimings::default();
+
+        let lookup_path = dir.join(LOOKUP_FILENAME);
+        let postings_path = dir.join(POSTINGS_FILENAME);
+        let paths_path = dir.join(PATHS_FILENAME);
+
+        let t = Instant::now();
+        let bundle = Self::open_lookup_postings(&lookup_path, &postings_path)?;
+        timings.lookup_open_and_mmap_ms = ms(t);
+
+        let t = Instant::now();
+        let mut postings = OpenOptions::new().read(true).open(&postings_path)?;
+        let mut hdr_buf = [0u8; HEADER_LEN];
+        postings.read_exact(&mut hdr_buf).map_err(|e| {
+            io::Error::other(format!(
+                "read postings header {}: {e}",
+                postings_path.display()
+            ))
+        })?;
+        timings.postings_open_and_header_ms = ms(t);
+
         let t = Instant::now();
         let paths = read_paths_lines(&paths_path)
             .map_err(|e| io::Error::other(format!("read {}: {e}", paths_path.display())))?;
         timings.paths_file_read_ms = ms(t);
 
-        Ok((
-            Self {
-                _lookup_file: lookup_file,
-                lookup,
-                postings,
-                postings_payload_base: HEADER_LEN as u64,
-            },
-            paths,
-            timings,
-        ))
+        Ok((bundle, paths, timings))
     }
 
     /// Binary search on the mmap’d lookup body; returns decoded lookup value.

@@ -60,6 +60,8 @@ pub const PATHS_FILENAME: &str = "paths.txt";
 
 /// Key/value metadata (`root=`, `format_version=`, `doc_count=`).
 pub const META_FILENAME: &str = "meta.txt";
+/// Top-level shard manifest for the bundle.
+pub const MANIFEST_FILENAME: &str = "manifest.isearch";
 
 /// Bit flags in [`IsearchIndexFileHeader::flags`]. None defined yet.
 pub mod flags {
@@ -306,6 +308,25 @@ pub struct PostingsBlobFile {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardManifestEntry {
+    pub shard_id: u32,
+    pub doc_base: u32,
+    pub doc_count: u32,
+    pub lookup_relpath: String,
+    pub postings_relpath: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardedManifest {
+    pub format_version: u32,
+    pub root: String,
+    pub doc_count: u32,
+    pub shard_count: u32,
+    pub target_postings_bytes: u64,
+    pub shards: Vec<ShardManifestEntry>,
+}
+
 // ── Storage layout under ~/.isearch/indexes ───────────────────────────────────
 
 /// Directory name for the index bundle under `~/.isearch/indexes/<pwd_hash>/`.
@@ -420,6 +441,19 @@ pub(crate) fn write_paths_file(path: &Path, store: &DocStore) -> io::Result<()> 
     fs::write(path, buf)
 }
 
+pub(crate) fn write_paths_lines(path: &Path, paths: &[String]) -> io::Result<()> {
+    let mut nbytes = 0usize;
+    for p in paths {
+        nbytes = nbytes.saturating_add(p.len()).saturating_add(1);
+    }
+    let mut buf = Vec::with_capacity(nbytes);
+    for p in paths {
+        buf.extend_from_slice(p.as_bytes());
+        buf.push(b'\n');
+    }
+    fs::write(path, buf)
+}
+
 pub(crate) fn write_meta_file(path: &Path, root: &Path, doc_count: usize) -> io::Result<()> {
     let mut f = fs::File::create(path)?;
     writeln!(f, "root={}", root.display())?;
@@ -472,6 +506,150 @@ pub(crate) fn decode_file_header(
 pub(crate) fn read_paths_lines(path: &Path) -> io::Result<Vec<String>> {
     let text = fs::read_to_string(path)?;
     Ok(text.lines().map(String::from).collect())
+}
+
+pub fn write_sharded_manifest(path: &Path, m: &ShardedManifest) -> io::Result<()> {
+    let mut f = fs::File::create(path)?;
+    writeln!(f, "format_version={}", m.format_version)?;
+    writeln!(f, "root={}", m.root)?;
+    writeln!(f, "doc_count={}", m.doc_count)?;
+    writeln!(f, "shard_count={}", m.shard_count)?;
+    writeln!(f, "target_postings_bytes={}", m.target_postings_bytes)?;
+    for s in &m.shards {
+        writeln!(
+            f,
+            "shard={},{},{},{},{}",
+            s.shard_id, s.doc_base, s.doc_count, s.lookup_relpath, s.postings_relpath
+        )?;
+    }
+    Ok(())
+}
+
+pub fn read_sharded_manifest(path: &Path) -> io::Result<ShardedManifest> {
+    let text = fs::read_to_string(path)?;
+    let mut format_version = None;
+    let mut root = None;
+    let mut doc_count = None;
+    let mut shard_count = None;
+    let mut target_postings_bytes = None;
+    let mut shards = Vec::new();
+
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("format_version=") {
+            format_version = Some(v.parse::<u32>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bad format_version: {e}"),
+                )
+            })?);
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("root=") {
+            root = Some(v.to_owned());
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("doc_count=") {
+            doc_count = Some(v.parse::<u32>().map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("bad doc_count: {e}"))
+            })?);
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("shard_count=") {
+            shard_count = Some(v.parse::<u32>().map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("bad shard_count: {e}"))
+            })?);
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("target_postings_bytes=") {
+            target_postings_bytes = Some(v.parse::<u64>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bad target_postings_bytes: {e}"),
+                )
+            })?);
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("shard=") {
+            let parts: Vec<&str> = v.splitn(5, ',').collect();
+            if parts.len() != 5 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "malformed shard row",
+                ));
+            }
+            shards.push(ShardManifestEntry {
+                shard_id: parts[0].parse::<u32>().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad shard_id: {e}"))
+                })?,
+                doc_base: parts[1].parse::<u32>().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad doc_base: {e}"))
+                })?,
+                doc_count: parts[2].parse::<u32>().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad doc_count: {e}"))
+                })?,
+                lookup_relpath: parts[3].to_owned(),
+                postings_relpath: parts[4].to_owned(),
+            });
+            continue;
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown manifest line: {line}"),
+        ));
+    }
+
+    let m = ShardedManifest {
+        format_version: format_version
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing format_version"))?,
+        root: root.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing root"))?,
+        doc_count: doc_count
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing doc_count"))?,
+        shard_count: shard_count
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing shard_count"))?,
+        target_postings_bytes: target_postings_bytes.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "missing target_postings_bytes")
+        })?,
+        shards,
+    };
+    validate_sharded_manifest(&m)?;
+    Ok(m)
+}
+
+pub fn validate_sharded_manifest(m: &ShardedManifest) -> io::Result<()> {
+    if m.shard_count != m.shards.len() as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shard_count does not match shard rows",
+        ));
+    }
+    let mut expected_doc_base = 0u32;
+    for (idx, s) in m.shards.iter().enumerate() {
+        if s.shard_id != idx as u32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shard_id sequence must be contiguous from 0",
+            ));
+        }
+        if s.doc_base != expected_doc_base {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "doc_base sequence is invalid",
+            ));
+        }
+        expected_doc_base = expected_doc_base
+            .checked_add(s.doc_count)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "doc_count overflow"))?;
+    }
+    if expected_doc_base != m.doc_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sum(doc_count) across shards does not match manifest doc_count",
+        ));
+    }
+    Ok(())
 }
 
 // ── Tests: header size and magic uniqueness ───────────────────────────────────
@@ -542,5 +720,50 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         let e = encode_postings_offset(LOOKUP_VALUE_MASK + 1).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn manifest_roundtrip_and_validation() {
+        let m = ShardedManifest {
+            format_version: FORMAT_VERSION,
+            root: "/tmp/root".to_owned(),
+            doc_count: 3,
+            shard_count: 2,
+            target_postings_bytes: 1024,
+            shards: vec![
+                ShardManifestEntry {
+                    shard_id: 0,
+                    doc_base: 0,
+                    doc_count: 2,
+                    lookup_relpath: "shards/000000/lookup.isearch".to_owned(),
+                    postings_relpath: "shards/000000/postings.isearch".to_owned(),
+                },
+                ShardManifestEntry {
+                    shard_id: 1,
+                    doc_base: 2,
+                    doc_count: 1,
+                    lookup_relpath: "shards/000001/lookup.isearch".to_owned(),
+                    postings_relpath: "shards/000001/postings.isearch".to_owned(),
+                },
+            ],
+        };
+        let p = std::env::temp_dir().join("isearch-manifest-test.txt");
+        write_sharded_manifest(&p, &m).unwrap();
+        let got = read_sharded_manifest(&p).unwrap();
+        assert_eq!(got, m);
+        let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn manifest_rejects_bad_rows() {
+        let p = std::env::temp_dir().join("isearch-manifest-bad.txt");
+        fs::write(
+            &p,
+            "format_version=2\nroot=/tmp\ndoc_count=1\nshard_count=1\ntarget_postings_bytes=1\nshard=0,1,1,a,b\n",
+        )
+        .unwrap();
+        let e = read_sharded_manifest(&p).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_file(p);
     }
 }

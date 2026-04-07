@@ -17,8 +17,8 @@ use clap::{Parser, Subcommand};
 use dirs::home_dir;
 use ignore::WalkBuilder;
 use index::{
-    index_bundle_path, pwd_hash, write_bundle, write_paths_and_meta, BuildOutput, DocId, Index,
-    MmapBundle, PostingsReadTimings, SpillOptions,
+    build_sharded_bundle, index_bundle_path, pwd_hash, DocId, PostingsReadTimings, ShardedBundle,
+    SpillOptions, DEFAULT_TARGET_POSTINGS_BYTES,
 };
 use regex_plan::PrefilterPlan;
 /// `./relative/path` under `root`, or the path as given with `/` separators.
@@ -61,6 +61,9 @@ enum Commands {
         /// Directory for spill run files. Default is bundle-local temp staging.
         #[arg(long)]
         spill_temp_dir: Option<PathBuf>,
+        /// Max postings payload bytes per shard.
+        #[arg(long, default_value_t = DEFAULT_TARGET_POSTINGS_BYTES)]
+        shard_target_postings_bytes: u64,
     },
     /// Search the indexed corpus with a Rust regex (sparse n-gram intersection when literals are extracted, then verifies).
     Query {
@@ -116,11 +119,13 @@ fn main() -> io::Result<()> {
             spill_min_paths,
             spill_max_pairs_in_mem,
             spill_temp_dir,
+            shard_target_postings_bytes,
         } => run_index(
             path,
             spill_min_paths,
             spill_max_pairs_in_mem,
             spill_temp_dir,
+            shard_target_postings_bytes,
         ),
         Commands::Query { text, path } => run_query(text, path),
         Commands::Watch {
@@ -157,6 +162,7 @@ fn run_index(
     spill_min_paths: usize,
     spill_max_pairs_in_mem: usize,
     spill_temp_dir: Option<PathBuf>,
+    shard_target_postings_bytes: u64,
 ) -> io::Result<()> {
     let root = std::fs::canonicalize(&path)
         .map_err(|e| io::Error::other(format!("canonicalize {}: {e}", path.display())))?;
@@ -188,17 +194,14 @@ fn run_index(
         spill_max_pairs_in_mem,
         spill_temp_dir,
     };
-    let (store, build) = Index::ingest_files_with_spill_options(&paths, &spill_options, &out_dir)?;
+    build_sharded_bundle(
+        &root,
+        &paths,
+        &spill_options,
+        &out_dir,
+        shard_target_postings_bytes,
+    )?;
     eprintln!("  build total: {:.2}s", t_total.elapsed().as_secs_f64());
-
-    match build {
-        BuildOutput::InMemory(index) => {
-            write_bundle(&out_dir, &index, &store, &root)?;
-        }
-        BuildOutput::SpilledToDisk => {
-            write_paths_and_meta(&out_dir, &store, &root)?;
-        }
-    }
     eprintln!("  wrote bundle under {}", out_dir.display());
 
     Ok(())
@@ -212,12 +215,8 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         ));
     }
 
-    let plan = regex_plan::build_regex_plan(&pattern).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid regex: {e}"),
-        )
-    })?;
+    let plan = regex_plan::build_regex_plan(&pattern)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid regex: {e}")))?;
 
     let t_query_total = Instant::now();
 
@@ -238,16 +237,9 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
     }
 
     let t_load = Instant::now();
-    let (bundle, paths, open_reads) = MmapBundle::open(&bundle_dir)?;
+    let (bundle, paths) = ShardedBundle::open(&bundle_dir)?;
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
-    eprintln!(
-        "opened bundle in {:.3}ms ({} docs)  [file reads: lookup open+mmap {:.3}ms, postings open+header {:.3}ms, paths.txt {:.3}ms]",
-        load_ms,
-        paths.len(),
-        open_reads.lookup_open_and_mmap_ms,
-        open_reads.postings_open_and_header_ms,
-        open_reads.paths_file_read_ms,
-    );
+    eprintln!("opened bundle in {:.3}ms ({} docs)", load_ms, paths.len());
 
     let mut effective_doc_paths: Option<HashMap<u32, String>> = None;
     let t_query = Instant::now();
@@ -255,7 +247,9 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         let candidate_doc_ids = match &plan.prefilter {
             PrefilterPlan::NeverMatches => Vec::new(),
             PrefilterPlan::AllDocs => docs.iter().map(|(doc_id, _, _)| DocId(*doc_id)).collect(),
-            PrefilterPlan::Union(_) => regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter),
+            PrefilterPlan::Union(_) => {
+                regex_plan::filter_watch_docs_by_prefilter(&docs, &plan.prefilter)
+            }
         };
         let mut map = HashMap::with_capacity(docs.len());
         for (doc_id, path, _) in docs {
@@ -264,7 +258,7 @@ fn run_query(pattern: String, path: PathBuf) -> io::Result<()> {
         effective_doc_paths = Some(map);
         (candidate_doc_ids, PostingsReadTimings::default())
     } else {
-        regex_plan::mmap_candidates(&bundle, paths.len(), &plan.prefilter)?
+        regex_plan::sharded_candidates(&bundle, paths.len(), &plan.prefilter)?
     };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
     if effective_doc_paths.is_some() {
@@ -347,7 +341,13 @@ fn run_watch(
 
     if !watch::has_base_bundle(&bundle_dir) {
         eprintln!("no baseline bundle found; building initial index first...");
-        run_index(path, 100_000, 20_000_000, None)?;
+        run_index(
+            path,
+            100_000,
+            20_000_000,
+            None,
+            DEFAULT_TARGET_POSTINGS_BYTES,
+        )?;
     }
 
     watch::run(watch::WatchConfig {
@@ -379,7 +379,13 @@ fn run_live(
 
     if !watch::has_base_bundle(&bundle_dir) {
         eprintln!("no baseline bundle found; building initial index first...");
-        run_index(path, 100_000, 20_000_000, None)?;
+        run_index(
+            path,
+            100_000,
+            20_000_000,
+            None,
+            DEFAULT_TARGET_POSTINGS_BYTES,
+        )?;
     }
 
     live::run(live::LiveConfig {

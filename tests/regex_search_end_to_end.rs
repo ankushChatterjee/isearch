@@ -40,7 +40,9 @@ impl Drop for TempWorkspace {
 
 fn run_isearch(args: &[&str], cwd: &Path) -> Output {
     let mut cmd = AssertCmd::cargo_bin("isearch").expect("cargo_bin isearch");
-    cmd.args(args).current_dir(cwd);
+    let home = cwd.join(".home");
+    fs::create_dir_all(&home).expect("create test home");
+    cmd.args(args).current_dir(cwd).env("HOME", home);
     cmd.output().expect("spawn isearch")
 }
 
@@ -55,6 +57,18 @@ fn index_workspace(root: &Path) {
 
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
+}
+
+fn sole_index_bundle(home: &Path) -> PathBuf {
+    let indexes_root = home.join(".isearch").join("indexes");
+    let mut dirs = fs::read_dir(&indexes_root)
+        .expect("read indexes dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect::<Vec<_>>();
+    dirs.sort();
+    assert_eq!(dirs.len(), 1, "expected exactly one index bundle root");
+    dirs[0].join("index")
 }
 
 #[test]
@@ -86,9 +100,18 @@ fn query_alternation_matches_files_from_each_branch() {
         stdout.contains("./a.txt") && stdout.contains("./b.txt"),
         "expected both branch files in output, got stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stdout.contains("2:foo"), "missing foo hit:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("2:bar"), "missing bar hit:\n{stdout}\nstderr:\n{stderr}");
-    assert!(!stdout.contains("./c.txt"), "unexpected non-match file:\n{stdout}");
+    assert!(
+        stdout.contains("2:foo"),
+        "missing foo hit:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("2:bar"),
+        "missing bar hit:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("./c.txt"),
+        "unexpected non-match file:\n{stdout}"
+    );
 }
 
 #[test]
@@ -113,9 +136,18 @@ fn query_matches_with_all_docs_fallback_prefixless_regex() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("./x.txt"), "expected fallback hit, got:\n{stdout}");
-    assert!(stdout.contains("1:abc12"), "expected matching line, got:\n{stdout}");
-    assert!(!stdout.contains("./y.txt"), "unexpected non-match file:\n{stdout}");
+    assert!(
+        stdout.contains("./x.txt"),
+        "expected fallback hit, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1:abc12"),
+        "expected matching line, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("./y.txt"),
+        "unexpected non-match file:\n{stdout}"
+    );
 }
 
 #[test]
@@ -134,7 +166,10 @@ fn query_dedupes_multiple_regex_matches_on_same_line() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("./dup.txt"), "missing file output:\n{stdout}");
+    assert!(
+        stdout.contains("./dup.txt"),
+        "missing file output:\n{stdout}"
+    );
     assert_eq!(
         count_occurrences(&stdout, "1:foo foo foo"),
         1,
@@ -149,7 +184,12 @@ fn query_unsatisfiable_regex_returns_no_hits() {
     index_workspace(&ws.root);
 
     let out = run_isearch(
-        &["query", "\\b\\B", "--path", ws.root.to_string_lossy().as_ref()],
+        &[
+            "query",
+            "\\b\\B",
+            "--path",
+            ws.root.to_string_lossy().as_ref(),
+        ],
         &ws.root,
     );
     assert!(
@@ -161,5 +201,60 @@ fn query_unsatisfiable_regex_returns_no_hits() {
     assert!(
         stdout.trim().is_empty(),
         "expected no stdout matches for unsatisfiable regex, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn index_splits_into_multiple_shards_when_target_is_small() {
+    let ws = TempWorkspace::new("shards");
+    for i in 0..16 {
+        let mut body = String::new();
+        for j in 0..64 {
+            body.push_str(&format!("token_{i}_{j}_abcdefghijklmno\n"));
+        }
+        ws.write(&format!("f{i:02}.txt"), &body);
+    }
+
+    let out = run_isearch(
+        &[
+            "index",
+            ws.root.to_string_lossy().as_ref(),
+            "--shard-target-postings-bytes",
+            "1024",
+        ],
+        &ws.root,
+    );
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bundle = sole_index_bundle(&ws.root.join(".home"));
+    let manifest = fs::read_to_string(bundle.join("manifest.isearch")).expect("read manifest");
+    let shard_rows = manifest.lines().filter(|l| l.starts_with("shard=")).count();
+    assert!(
+        shard_rows > 1,
+        "expected split shards, manifest:\n{manifest}"
+    );
+
+    let out = run_isearch(
+        &[
+            "query",
+            "token_3_4",
+            "--path",
+            ws.root.to_string_lossy().as_ref(),
+        ],
+        &ws.root,
+    );
+    assert!(
+        out.status.success(),
+        "query failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("./f03.txt"),
+        "expected matching file, got:\n{stdout}"
     );
 }

@@ -4,8 +4,8 @@ use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::index::format::{LOOKUP_FILENAME, META_FILENAME, PATHS_FILENAME, POSTINGS_FILENAME};
-use crate::index::{write_bundle, Index};
+use crate::index::format::{MANIFEST_FILENAME, META_FILENAME, PATHS_FILENAME};
+use crate::index::{build_sharded_bundle, SpillOptions, DEFAULT_TARGET_POSTINGS_BYTES};
 
 use super::delta;
 use super::state::{now_unix_secs, DocMeta, WatchState};
@@ -25,11 +25,7 @@ pub fn compact(
         .collect();
     alive.sort_unstable_by(|a, b| a.path.cmp(&b.path));
 
-    let docs: Vec<(String, Vec<u32>)> = alive
-        .iter()
-        .map(|d| (d.path.clone(), d.hashes.clone()))
-        .collect();
-    let (store, index) = Index::build_from_doc_hashes(&docs)?;
+    let paths: Vec<String> = alive.iter().map(|d| d.path.clone()).collect();
     let tmp_bundle = bundle_dir.join(format!(
         ".compact-{}",
         SystemTime::now()
@@ -38,13 +34,22 @@ pub fn compact(
             .as_nanos()
     ));
     fs::create_dir_all(&tmp_bundle)?;
-    write_bundle(&tmp_bundle, &index, &store, root)?;
-    for name in [
-        LOOKUP_FILENAME,
-        POSTINGS_FILENAME,
-        PATHS_FILENAME,
-        META_FILENAME,
-    ] {
+    let spill = SpillOptions::default();
+    build_sharded_bundle(
+        root,
+        &paths,
+        &spill,
+        &tmp_bundle,
+        DEFAULT_TARGET_POSTINGS_BYTES,
+    )?;
+    for name in [MANIFEST_FILENAME, PATHS_FILENAME, META_FILENAME, "shards"] {
+        if bundle_dir.join(name).exists() {
+            if bundle_dir.join(name).is_dir() {
+                fs::remove_dir_all(bundle_dir.join(name))?;
+            } else {
+                fs::remove_file(bundle_dir.join(name))?;
+            }
+        }
         fs::rename(tmp_bundle.join(name), bundle_dir.join(name))?;
     }
     let _ = fs::remove_dir_all(&tmp_bundle);

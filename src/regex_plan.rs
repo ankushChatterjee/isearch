@@ -6,7 +6,7 @@ use regex::Regex;
 use regex_syntax::hir::literal::Extractor;
 use regex_syntax::parse;
 
-use crate::index::{DocId, MmapBundle, PostingsReadTimings};
+use crate::index::{DocId, MmapBundle, PostingsReadTimings, ShardedBundle};
 use crate::ngram;
 
 /// How to narrow candidate documents before regex verification.
@@ -74,10 +74,9 @@ pub fn doc_matches_prefilter(doc_hashes: &[u32], pref: &PrefilterPlan) -> bool {
     match pref {
         PrefilterPlan::NeverMatches => false,
         PrefilterPlan::AllDocs => true,
-        PrefilterPlan::Union(groups) => groups.iter().any(|g| {
-            g.iter()
-                .all(|h| doc_hashes.binary_search(h).is_ok())
-        }),
+        PrefilterPlan::Union(groups) => groups
+            .iter()
+            .any(|g| g.iter().all(|h| doc_hashes.binary_search(h).is_ok())),
     }
 }
 
@@ -95,6 +94,21 @@ pub fn filter_watch_docs_by_prefilter(
 /// Resolve mmap posting candidates from a prefilter plan.
 pub fn mmap_candidates(
     bundle: &MmapBundle,
+    paths_len: usize,
+    pref: &PrefilterPlan,
+) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
+    match pref {
+        PrefilterPlan::NeverMatches => Ok((Vec::new(), PostingsReadTimings::default())),
+        PrefilterPlan::AllDocs => Ok((
+            (0..paths_len).map(|i| DocId(i as u32)).collect(),
+            PostingsReadTimings::default(),
+        )),
+        PrefilterPlan::Union(groups) => bundle.candidates_union(groups),
+    }
+}
+
+pub fn sharded_candidates(
+    bundle: &ShardedBundle,
     paths_len: usize,
     pref: &PrefilterPlan,
 ) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {

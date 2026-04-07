@@ -10,10 +10,7 @@ fn query_rejects_invalid_regex() {
     cmd.args(["query", "("]);
     cmd.current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let out = cmd.output().expect("spawn");
-    assert!(
-        !out.status.success(),
-        "expected failure for invalid regex"
-    );
+    assert!(!out.status.success(), "expected failure for invalid regex");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("invalid regex"),

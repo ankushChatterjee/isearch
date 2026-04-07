@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io;
+use std::sync::{Arc, Mutex};
 
 use memchr::{memchr, memchr_iter, memmem, memrchr};
 use rayon::prelude::*;
@@ -90,8 +91,8 @@ pub fn verify_candidate_regex(
     let bytes = fs::read(path)?;
     let read_ms = t_read.elapsed().as_secs_f64() * 1000.0;
 
-    let s = std::str::from_utf8(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let s =
+        std::str::from_utf8(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let matches: Vec<usize> = re.find_iter(s).map(|m| m.start()).collect();
     if matches.is_empty() {
@@ -189,6 +190,22 @@ pub fn verify_candidates_parallel_regex(
     paths: &[String],
     re: &Regex,
 ) -> Vec<VerifyFileResult> {
+    let (verify_results, errors) =
+        verify_candidates_parallel_regex_collect_errors(candidates, paths, re);
+    for err in errors {
+        eprintln!("{err}");
+    }
+    verify_results
+}
+
+/// Parallel regex verification over candidate doc ids (paths resolved from `paths`),
+/// collecting read/decode errors for caller-managed logging.
+pub fn verify_candidates_parallel_regex_collect_errors(
+    candidates: &[DocId],
+    paths: &[String],
+    re: &Regex,
+) -> (Vec<VerifyFileResult>, Vec<String>) {
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut verify_results: Vec<VerifyFileResult> = candidates
         .par_iter()
         .filter_map(|&doc_id| {
@@ -197,7 +214,9 @@ pub fn verify_candidates_parallel_regex(
                 Ok(Some(v)) => Some(v),
                 Ok(None) => None,
                 Err(e) => {
-                    eprintln!("{}: read error: {e}", rel_path);
+                    if let Ok(mut out) = errors.lock() {
+                        out.push(format!("{rel_path}: read error: {e}"));
+                    }
                     None
                 }
             }
@@ -205,7 +224,8 @@ pub fn verify_candidates_parallel_regex(
         .collect();
 
     verify_results.sort_unstable_by_key(|v| v.doc_id);
-    verify_results
+    let collected = errors.lock().map(|v| v.clone()).unwrap_or_default();
+    (verify_results, collected)
 }
 
 /// Parallel regex verification over explicit `(DocId, path)` pairs.
@@ -213,6 +233,20 @@ pub fn verify_doc_paths_parallel_regex(
     candidates: &[(DocId, String)],
     re: &Regex,
 ) -> Vec<VerifyFileResult> {
+    let (verify_results, errors) = verify_doc_paths_parallel_regex_collect_errors(candidates, re);
+    for err in errors {
+        eprintln!("{err}");
+    }
+    verify_results
+}
+
+/// Parallel regex verification over explicit `(DocId, path)` pairs,
+/// collecting read/decode errors for caller-managed logging.
+pub fn verify_doc_paths_parallel_regex_collect_errors(
+    candidates: &[(DocId, String)],
+    re: &Regex,
+) -> (Vec<VerifyFileResult>, Vec<String>) {
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut verify_results: Vec<VerifyFileResult> = candidates
         .par_iter()
         .filter_map(
@@ -220,12 +254,15 @@ pub fn verify_doc_paths_parallel_regex(
                 Ok(Some(v)) => Some(v),
                 Ok(None) => None,
                 Err(e) => {
-                    eprintln!("{}: read error: {e}", rel_path);
+                    if let Ok(mut out) = errors.lock() {
+                        out.push(format!("{rel_path}: read error: {e}"));
+                    }
                     None
                 }
             },
         )
         .collect();
     verify_results.sort_unstable_by_key(|v| v.doc_id);
-    verify_results
+    let collected = errors.lock().map(|v| v.clone()).unwrap_or_default();
+    (verify_results, collected)
 }
