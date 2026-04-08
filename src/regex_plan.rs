@@ -6,7 +6,7 @@ use regex::Regex;
 use regex_syntax::hir::literal::Extractor;
 use regex_syntax::parse;
 
-use crate::index::{DocId, MmapBundle, PostingsReadTimings, ShardedBundle};
+use crate::index::{DocId, PostingsReadTimings, ShardedBundle};
 use crate::ngram;
 
 /// How to narrow candidate documents before regex verification.
@@ -89,22 +89,6 @@ pub fn filter_watch_docs_by_prefilter(
         .filter(|(_, _, dh)| doc_matches_prefilter(dh, pref))
         .map(|(id, _, _)| DocId(*id))
         .collect()
-}
-
-/// Resolve mmap posting candidates from a prefilter plan.
-pub fn mmap_candidates(
-    bundle: &MmapBundle,
-    paths_len: usize,
-    pref: &PrefilterPlan,
-) -> io::Result<(Vec<DocId>, PostingsReadTimings)> {
-    match pref {
-        PrefilterPlan::NeverMatches => Ok((Vec::new(), PostingsReadTimings::default())),
-        PrefilterPlan::AllDocs => Ok((
-            (0..paths_len).map(|i| DocId(i as u32)).collect(),
-            PostingsReadTimings::default(),
-        )),
-        PrefilterPlan::Union(groups) => bundle.candidates_union(groups),
-    }
 }
 
 pub fn sharded_candidates(

@@ -15,8 +15,8 @@ use std::time::Instant;
 use memmap2::MmapOptions;
 
 use super::format::{
-    decode_file_header, decode_lookup_value, read_paths_lines, LookupEntryRecord, LookupValue,
-    LOOKUP_FILENAME, LOOKUP_MAGIC, PATHS_FILENAME, POSTINGS_FILENAME, POSTINGS_MAGIC,
+    decode_file_header, decode_lookup_value, LookupEntryRecord, LookupValue, LOOKUP_MAGIC,
+    POSTINGS_MAGIC,
 };
 use super::reader::{intersect_sorted, union_sorted};
 use super::types::DocId;
@@ -25,17 +25,6 @@ const HEADER_LEN: usize = 32;
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
-}
-
-/// Wall-clock time for file-backed steps during [`MmapBundle::open`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BundleOpenTimings {
-    /// Open lookup file + `mmap` the lookup table.
-    pub lookup_open_and_mmap_ms: f64,
-    /// Open postings file + read 32-byte header.
-    pub postings_open_and_header_ms: f64,
-    /// Read `paths.txt` into memory.
-    pub paths_file_read_ms: f64,
 }
 
 /// Time spent reading posting lists from `postings.isearch` during [`MmapBundle::candidates`].
@@ -131,37 +120,6 @@ impl MmapBundle {
             postings,
             postings_payload_base: HEADER_LEN as u64,
         })
-    }
-
-    /// Open bundle: mmap `lookup.isearch`, open `postings.isearch` for reads at offset, load `paths.txt`.
-    pub fn open(dir: &Path) -> io::Result<(Self, Vec<String>, BundleOpenTimings)> {
-        let mut timings = BundleOpenTimings::default();
-
-        let lookup_path = dir.join(LOOKUP_FILENAME);
-        let postings_path = dir.join(POSTINGS_FILENAME);
-        let paths_path = dir.join(PATHS_FILENAME);
-
-        let t = Instant::now();
-        let bundle = Self::open_lookup_postings(&lookup_path, &postings_path)?;
-        timings.lookup_open_and_mmap_ms = ms(t);
-
-        let t = Instant::now();
-        let mut postings = OpenOptions::new().read(true).open(&postings_path)?;
-        let mut hdr_buf = [0u8; HEADER_LEN];
-        postings.read_exact(&mut hdr_buf).map_err(|e| {
-            io::Error::other(format!(
-                "read postings header {}: {e}",
-                postings_path.display()
-            ))
-        })?;
-        timings.postings_open_and_header_ms = ms(t);
-
-        let t = Instant::now();
-        let paths = read_paths_lines(&paths_path)
-            .map_err(|e| io::Error::other(format!("read {}: {e}", paths_path.display())))?;
-        timings.paths_file_read_ms = ms(t);
-
-        Ok((bundle, paths, timings))
     }
 
     /// Binary search on the mmap’d lookup body; returns decoded lookup value.
