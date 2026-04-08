@@ -172,11 +172,71 @@ fn sorted_diff(old: &[u32], new: &[u32]) -> (Vec<u32>, Vec<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn sorted_diff_is_correct() {
         let (r, a) = sorted_diff(&[1, 2, 5], &[2, 3, 5, 9]);
         assert_eq!(r, vec![1]);
         assert_eq!(a, vec![3, 9]);
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "isearch-watch-apply-{prefix}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn apply_actions_upsert_then_delete_updates_state_and_ops() {
+        let root = temp_dir("upsert-delete");
+        let file = root.join("a.txt");
+        fs::write(&file, "alpha beta\n").unwrap();
+        let mut state = WatchState::new(&root);
+
+        let upsert_ops = apply_actions(&mut state, &[FileAction::Upsert(file.clone())]).unwrap();
+        assert!(upsert_ops
+            .iter()
+            .any(|op| matches!(op, DeltaOp::UpsertPath { .. })));
+        let doc_id = *state
+            .path_to_doc
+            .get(file.to_string_lossy().as_ref())
+            .unwrap();
+        let hashes_after_upsert = state.docs.get(&doc_id).unwrap().hashes.clone();
+        assert!(!hashes_after_upsert.is_empty());
+
+        fs::remove_file(&file).unwrap();
+        let delete_ops = apply_actions(&mut state, &[FileAction::Delete(file.clone())]).unwrap();
+        assert!(delete_ops
+            .iter()
+            .any(|op| matches!(op, DeltaOp::TombstoneDoc { .. })));
+        assert!(state.docs.get(&doc_id).unwrap().tombstone);
+        assert!(state.docs.get(&doc_id).unwrap().hashes.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_actions_binary_file_becomes_tombstone() {
+        let root = temp_dir("binary");
+        let file = root.join("bin.dat");
+        fs::write(&file, [0, 1, 2, 3]).unwrap();
+        let mut state = WatchState::new(&root);
+
+        let ops = apply_actions(&mut state, &[FileAction::Upsert(file.clone())]).unwrap();
+        assert!(ops.is_empty(), "binary file should not produce index ops");
+        let path_key = file.to_string_lossy().to_string();
+        assert!(
+            !state.path_to_doc.contains_key(&path_key),
+            "binary file should not remain indexed"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

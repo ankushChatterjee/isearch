@@ -397,3 +397,28 @@ fn run_live(
         max_results,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_result_path_display_is_relative_for_files_under_root() {
+        let root = PathBuf::from("/tmp/project");
+        let p = root.join("src/lib.rs");
+        assert_eq!(
+            query_result_path_display(p.to_string_lossy().as_ref(), &root),
+            "./src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn query_result_path_display_keeps_original_when_outside_root() {
+        let root = PathBuf::from("/tmp/project");
+        let p = PathBuf::from("/tmp/other/file.rs");
+        assert_eq!(
+            query_result_path_display(p.to_string_lossy().as_ref(), &root),
+            "/tmp/other/file.rs"
+        );
+    }
+}

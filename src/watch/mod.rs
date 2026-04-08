@@ -348,3 +348,106 @@ impl Drop for WatchLock {
         let _ = fs::remove_file(&self.path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::format::{
+        write_sharded_manifest, ShardManifestEntry, ShardedManifest, FORMAT_VERSION,
+        LOOKUP_FILENAME, MANIFEST_FILENAME, META_FILENAME, PATHS_FILENAME, POSTINGS_FILENAME,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "isearch-watch-{prefix}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_minimal_bundle_layout(bundle_dir: &Path) {
+        fs::write(bundle_dir.join(PATHS_FILENAME), "/tmp/a\n").unwrap();
+        fs::write(bundle_dir.join(META_FILENAME), "root=/tmp\n").unwrap();
+        fs::write(bundle_dir.join(LOOKUP_FILENAME), b"dummy").unwrap();
+        fs::write(bundle_dir.join(POSTINGS_FILENAME), b"dummy").unwrap();
+        let manifest = ShardedManifest {
+            format_version: FORMAT_VERSION,
+            root: "/tmp".to_string(),
+            doc_count: 1,
+            shard_count: 1,
+            target_postings_bytes: 1024,
+            shards: vec![ShardManifestEntry {
+                shard_id: 0,
+                doc_base: 0,
+                doc_count: 1,
+                lookup_relpath: LOOKUP_FILENAME.to_string(),
+                postings_relpath: POSTINGS_FILENAME.to_string(),
+            }],
+        };
+        write_sharded_manifest(&bundle_dir.join(MANIFEST_FILENAME), &manifest).unwrap();
+    }
+
+    #[test]
+    fn has_base_bundle_requires_manifest_paths_meta_and_shards() {
+        let dir = temp_dir("base-layout");
+        assert!(!has_base_bundle(&dir));
+
+        write_minimal_bundle_layout(&dir);
+        assert!(has_base_bundle(&dir));
+
+        fs::remove_file(dir.join(META_FILENAME)).unwrap();
+        assert!(!has_base_bundle(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_query_docs_applies_delta_replay_and_ignores_tombstones() {
+        let bundle_dir = temp_dir("load-query-docs");
+        let root = temp_dir("root");
+        let mut state = WatchState::new(&root);
+        let a = state.ensure_doc_for_path("/tmp/a.txt");
+        let b = state.ensure_doc_for_path("/tmp/b.txt");
+        state.docs.get_mut(&a).unwrap().hashes = vec![10];
+        state.docs.get_mut(&b).unwrap().hashes = vec![20];
+        state.last_delta_offset = delta::header_len();
+        state
+            .persist(&bundle_dir.join(WATCH_STATE_FILENAME))
+            .expect("persist state");
+
+        let mut writer = DeltaWriter::open(&bundle_dir.join(DELTA_FILENAME)).unwrap();
+        writer
+            .append_batch(&[
+                DeltaOp::AddHash {
+                    doc_id: a,
+                    hash: 11,
+                },
+                DeltaOp::TombstoneDoc { doc_id: b },
+            ])
+            .unwrap();
+
+        let docs = load_query_docs(&bundle_dir)
+            .unwrap()
+            .expect("expected docs from watch state");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].0, a);
+        assert_eq!(docs[0].1, "/tmp/a.txt");
+        assert_eq!(docs[0].2, vec![10, 11]);
+
+        let _ = fs::remove_dir_all(bundle_dir);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_query_docs_returns_none_when_state_missing() {
+        let bundle_dir = temp_dir("state-missing");
+        let got = load_query_docs(&bundle_dir).unwrap();
+        assert!(got.is_none());
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+}

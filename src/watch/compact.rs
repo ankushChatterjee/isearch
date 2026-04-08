@@ -69,3 +69,63 @@ pub fn compact(
     state.last_delta_offset = delta::header_len();
     state.persist(state_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::watch::delta::{header_len, replay, DeltaOp, DeltaWriter, DELTA_FILENAME};
+    use std::path::PathBuf;
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "isearch-watch-compact-{prefix}-{}-{}",
+            std::process::id(),
+            now_unix_secs()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn compact_rebuilds_alive_docs_and_resets_delta() {
+        let root = temp_dir("root");
+        let bundle_dir = temp_dir("bundle");
+        fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        fs::write(root.join("b.txt"), "beta\n").unwrap();
+
+        let mut state = WatchState::new(&root);
+        let a = state.ensure_doc_for_path(root.join("a.txt").to_string_lossy().as_ref());
+        let b = state.ensure_doc_for_path(root.join("b.txt").to_string_lossy().as_ref());
+        state.docs.get_mut(&a).unwrap().hashes = vec![1, 2];
+        state.docs.get_mut(&b).unwrap().hashes = vec![3, 4];
+        state.docs.get_mut(&b).unwrap().tombstone = true;
+
+        let state_path = bundle_dir.join("watch_state.bin");
+        let delta_path = bundle_dir.join(DELTA_FILENAME);
+        state.last_delta_offset = header_len();
+        state.persist(&state_path).unwrap();
+
+        let mut writer = DeltaWriter::open(&delta_path).unwrap();
+        writer
+            .append_batch(&[DeltaOp::AddHash {
+                doc_id: a,
+                hash: 999,
+            }])
+            .unwrap();
+
+        compact(&bundle_dir, &root, &state_path, &delta_path, &mut state).unwrap();
+
+        assert_eq!(state.docs.len(), 1, "tombstoned doc should be dropped");
+        assert_eq!(state.next_doc_id, 1);
+        assert_eq!(state.last_delta_offset, header_len());
+        assert!(bundle_dir.join(MANIFEST_FILENAME).is_file());
+        assert!(bundle_dir.join(PATHS_FILENAME).is_file());
+        assert!(bundle_dir.join(META_FILENAME).is_file());
+        let (ops, off) = replay(&delta_path, header_len()).unwrap();
+        assert!(ops.is_empty(), "delta should be reset after compaction");
+        assert_eq!(off, header_len());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+}

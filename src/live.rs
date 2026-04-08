@@ -685,3 +685,43 @@ fn highlight_spans(
     }
     spans
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_for_tui_replaces_tabs_and_controls() {
+        let got = sanitize_for_tui("a\tb\u{0007}c");
+        assert_eq!(got, "a    b c");
+    }
+
+    #[test]
+    fn highlight_spans_marks_all_occurrences() {
+        let spans = highlight_spans(
+            "foo bar foo",
+            "foo",
+            Style::default(),
+            Style::default().fg(Color::Yellow),
+        );
+        let texts: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["foo", " bar ", "foo"]);
+    }
+
+    #[test]
+    fn query_result_path_display_uses_relative_prefix_when_under_root() {
+        let root = PathBuf::from("/tmp/isearch-root");
+        let file = root.join("src/main.rs");
+        let shown = query_result_path_display(file.to_string_lossy().as_ref(), &root);
+        assert_eq!(shown, "./src/main.rs");
+    }
+
+    #[test]
+    fn app_queue_search_increments_query_id_and_marks_pending() {
+        let mut app = App::new();
+        assert!(app.pending_query_id().is_none());
+        app.queue_search();
+        assert_eq!(app.in_flight_query_id, 1);
+        assert_eq!(app.pending_query_id(), Some(1));
+    }
+}

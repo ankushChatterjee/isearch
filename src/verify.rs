@@ -266,3 +266,81 @@ pub fn verify_doc_paths_parallel_regex_collect_errors(
     let collected = errors.lock().map(|v| v.clone()).unwrap_or_default();
     (verify_results, collected)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "isearch-{prefix}-{}-{nanos}.txt",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn verify_candidate_regex_reports_one_hit_per_matching_line() {
+        let file = temp_path("verify-regex");
+        fs::write(&file, "foo foo\r\nbar\nfoo\n").unwrap();
+        let re = Regex::new("foo").unwrap();
+
+        let got = verify_candidate_regex(file.to_string_lossy().as_ref(), &re, DocId(7))
+            .unwrap()
+            .expect("expected regex hit");
+
+        assert_eq!(got.doc_id, DocId(7));
+        assert_eq!(got.hits.len(), 2);
+        assert_eq!(got.hits[0].line_no, 1);
+        assert_eq!(got.hits[0].line, "foo foo");
+        assert_eq!(got.hits[1].line_no, 3);
+        assert_eq!(got.hits[1].line, "foo");
+        let _ = fs::remove_file(file);
+    }
+
+    #[test]
+    fn verify_candidate_regex_rejects_non_utf8() {
+        let file = temp_path("verify-non-utf8");
+        fs::write(&file, [0xffu8, 0xfe, 0xfd]).unwrap();
+        let re = Regex::new("foo").unwrap();
+
+        let err = verify_candidate_regex(file.to_string_lossy().as_ref(), &re, DocId(1))
+            .expect_err("expected UTF-8 decode error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_file(file);
+    }
+
+    #[test]
+    fn verify_candidates_parallel_regex_collect_errors_sorts_and_collects() {
+        let hit = temp_path("verify-hit");
+        let miss = temp_path("verify-miss");
+        fs::write(&hit, "alpha\n").unwrap();
+        fs::write(&miss, "zzz\n").unwrap();
+
+        let missing = temp_path("verify-missing");
+        let paths = vec![
+            hit.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+            miss.to_string_lossy().into_owned(),
+        ];
+        let candidates = vec![DocId(2), DocId(0), DocId(1)];
+        let re = Regex::new("alpha").unwrap();
+
+        let (results, errors) =
+            verify_candidates_parallel_regex_collect_errors(&candidates, &paths, &re);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, DocId(0));
+        assert_eq!(results[0].hits[0].line, "alpha");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("read error"));
+
+        let _ = fs::remove_file(hit);
+        let _ = fs::remove_file(miss);
+    }
+}

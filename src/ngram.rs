@@ -110,3 +110,39 @@ pub fn hash_ngram(ngram: &[u8]) -> u32 {
     }
     h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_all_ngrams_handles_short_inputs() {
+        assert_eq!(extract_all_ngrams(b"").count(), 0);
+        assert_eq!(extract_all_ngrams(b"a").count(), 0);
+        assert!(extract_all_ngrams(b"ab").any(|g| g == b"ab"));
+    }
+
+    #[test]
+    fn covering_ngrams_short_input_returns_whole_text() {
+        assert_eq!(covering_ngrams(b""), vec![b"".as_ref()]);
+        assert_eq!(covering_ngrams(b"x"), vec![b"x".as_ref()]);
+    }
+
+    #[test]
+    fn covering_ngrams_roundtrips_original_bytes() {
+        let text = b"alpha_beta_gamma";
+        let parts = covering_ngrams(text);
+        assert!(!parts.is_empty());
+        let joined: Vec<u8> = parts.iter().flat_map(|p| p.iter().copied()).collect();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn hash_ngram_is_stable_for_same_input() {
+        let a = hash_ngram(b"needle");
+        let b = hash_ngram(b"needle");
+        let c = hash_ngram(b"needlf");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+}
